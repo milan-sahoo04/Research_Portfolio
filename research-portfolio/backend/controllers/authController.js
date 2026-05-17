@@ -1,0 +1,584 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// backend/controllers/authController.js
+// Handles: signup, login, logout, getMe, forgotPassword,
+//          resetPassword, verifyEmail, refreshToken
+// ─────────────────────────────────────────────────────────────────────────────
+import dotenv from "dotenv";
+dotenv.config();
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import { supabaseAdmin, TABLES } from "../config/supabaseClient.js";
+import { sendEmail } from "../utils/email.js";
+
+// ─────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────
+const SALT_ROUNDS = 12;
+const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES || "15m";
+const JWT_REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES || "7d";
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+
+/** Generate access + refresh token pair for a user record */
+function generateTokens(user) {
+  const payload = {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+  };
+
+  const accessToken = jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_ACCESS_EXPIRES,
+  });
+
+  const refreshToken = jwt.sign({ id: user.id }, JWT_REFRESH_SECRET, {
+    expiresIn: JWT_REFRESH_EXPIRES,
+  });
+
+  return { accessToken, refreshToken };
+}
+
+/** Strip sensitive fields before sending user to client */
+function sanitizeUser(user) {
+  const {
+    password,
+    reset_token,
+    reset_token_expires,
+    verification_token,
+    ...safe
+  } = user;
+  return safe;
+}
+
+/** Send a standardised success response */
+function ok(res, data = {}, statusCode = 200) {
+  return res.status(statusCode).json({ success: true, ...data });
+}
+
+/** Send a standardised error response */
+function fail(res, message, statusCode = 400) {
+  return res.status(statusCode).json({ success: false, message });
+}
+
+// ─────────────────────────────────────────────
+// 1. SIGNUP
+// POST /api/auth/signup
+// Body: { name, email, password, role? }
+// ─────────────────────────────────────────────
+export const signup = async (req, res) => {
+  try {
+    const { name, email, password, role = "user" } = req.body;
+
+    // ── Basic validation ──
+    if (!name?.trim()) return fail(res, "Name is required.");
+    if (!email?.trim()) return fail(res, "Email is required.");
+    if (!password) return fail(res, "Password is required.");
+    if (password.length < 8)
+      return fail(res, "Password must be at least 8 characters.");
+    if (!["admin", "user"].includes(role))
+      return fail(res, "Invalid role. Must be 'admin' or 'user'.");
+
+    const emailLower = email.toLowerCase().trim();
+
+    // ── Check if email already exists ──
+    const { data: existing } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id")
+      .eq("email", emailLower)
+      .single();
+
+    if (existing)
+      return fail(res, "An account with this email already exists.", 409);
+
+    // ── Hash password ──
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+
+    // ── Generate email verification token ──
+    const verificationToken = jwt.sign({ email: emailLower }, JWT_SECRET, {
+      expiresIn: "24h",
+    });
+
+    // ── Insert user into DB ──
+    const { data: newUser, error: insertError } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .insert({
+        name: name.trim(),
+        email: emailLower,
+        password: hashedPassword,
+        role,
+        is_verified: false,
+        verification_token: verificationToken,
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (insertError) throw new Error(insertError.message);
+
+    // ── Send verification email ──
+    const verifyUrl = `${CLIENT_URL}/verify-email?token=${verificationToken}`;
+    await sendEmail({
+      to: emailLower,
+      subject: "Verify your email — Research Portfolio",
+      html: `
+        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#0f172a;color:#e2e8f0;border-radius:16px;">
+          <h2 style="color:#3b82f6;margin-bottom:8px;">Welcome, ${name.trim()}! 👋</h2>
+          <p style="color:#94a3b8;margin-bottom:24px;">Thanks for signing up. Please verify your email to activate your account.</p>
+          <a href="${verifyUrl}"
+            style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#3b82f6,#10b981);
+            color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:14px;">
+            Verify Email
+          </a>
+          <p style="color:#475569;font-size:12px;margin-top:24px;">This link expires in 24 hours. If you didn't create an account, ignore this email.</p>
+        </div>
+      `,
+    }).catch((err) =>
+      console.warn("[Auth] Verification email failed:", err.message),
+    );
+
+    return ok(
+      res,
+      {
+        message:
+          "Account created! Please check your email to verify your account.",
+        user: sanitizeUser(newUser),
+      },
+      201,
+    );
+  } catch (err) {
+    console.error("[Auth] signup error:", err.message);
+    return fail(res, "Signup failed. Please try again.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 2. LOGIN
+// POST /api/auth/login
+// Body: { email, password }
+// ─────────────────────────────────────────────
+export const login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email?.trim()) return fail(res, "Email is required.");
+    if (!password) return fail(res, "Password is required.");
+
+    const emailLower = email.toLowerCase().trim();
+
+    // ── Fetch user ──
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("*")
+      .eq("email", emailLower)
+      .single();
+
+    if (error || !user) return fail(res, "Invalid email or password.", 401);
+
+    // ── Compare password ──
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) return fail(res, "Invalid email or password.", 401);
+
+    // ── Check email verification ──
+    if (!user.is_verified)
+      return fail(res, "Please verify your email before logging in.", 403);
+
+    // ── Generate tokens ──
+    const { accessToken, refreshToken } = generateTokens(user);
+
+    // ── Store hashed refresh token in DB ──
+    const hashedRefresh = await bcrypt.hash(refreshToken, 10);
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        refresh_token: hashedRefresh,
+        last_login: new Date().toISOString(),
+      })
+      .eq("id", user.id);
+
+    // ── Set refresh token as httpOnly cookie ──
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
+    });
+
+    return ok(res, {
+      message: "Logged in successfully.",
+      accessToken,
+      user: sanitizeUser(user),
+    });
+  } catch (err) {
+    console.error("[Auth] login error:", err.message);
+    return fail(res, "Login failed. Please try again.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 3. LOGOUT
+// POST /api/auth/logout
+// Headers: Authorization: Bearer <token>
+// ─────────────────────────────────────────────
+export const logout = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (userId) {
+      // Clear refresh token from DB
+      await supabaseAdmin
+        .from(TABLES.USERS)
+        .update({ refresh_token: null })
+        .eq("id", userId);
+    }
+
+    // Clear cookie
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return ok(res, { message: "Logged out successfully." });
+  } catch (err) {
+    console.error("[Auth] logout error:", err.message);
+    return fail(res, "Logout failed.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 4. GET ME (current user)
+// GET /api/auth/me
+// Headers: Authorization: Bearer <token>
+// ─────────────────────────────────────────────
+export const getMe = async (req, res) => {
+  try {
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("*")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error || !user) return fail(res, "User not found.", 404);
+
+    return ok(res, { user: sanitizeUser(user) });
+  } catch (err) {
+    console.error("[Auth] getMe error:", err.message);
+    return fail(res, "Could not fetch user.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 5. REFRESH TOKEN
+// POST /api/auth/refresh
+// Cookie: refreshToken
+// ─────────────────────────────────────────────
+export const refreshToken = async (req, res) => {
+  try {
+    const token = req.cookies?.refreshToken;
+    if (!token) return fail(res, "No refresh token provided.", 401);
+
+    // ── Verify refresh token ──
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_REFRESH_SECRET);
+    } catch {
+      return fail(res, "Invalid or expired refresh token.", 401);
+    }
+
+    // ── Fetch user + stored hashed refresh token ──
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("*")
+      .eq("id", decoded.id)
+      .single();
+
+    if (error || !user || !user.refresh_token)
+      return fail(res, "Invalid refresh token.", 401);
+
+    // ── Compare tokens ──
+    const tokenMatch = await bcrypt.compare(token, user.refresh_token);
+    if (!tokenMatch) return fail(res, "Invalid refresh token.", 401);
+
+    // ── Rotate: generate new pair ──
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
+    const hashedRefresh = await bcrypt.hash(newRefreshToken, 10);
+
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({ refresh_token: hashedRefresh })
+      .eq("id", user.id);
+
+    res.cookie("refreshToken", newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return ok(res, { accessToken, user: sanitizeUser(user) });
+  } catch (err) {
+    console.error("[Auth] refreshToken error:", err.message);
+    return fail(res, "Token refresh failed.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 6. VERIFY EMAIL
+// GET /api/auth/verify-email?token=<token>
+// ─────────────────────────────────────────────
+export const verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return fail(res, "Verification token is required.");
+
+    // ── Decode token ──
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return fail(res, "Verification link is invalid or has expired.", 400);
+    }
+
+    // ── Find user by email + token ──
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, is_verified, verification_token")
+      .eq("email", decoded.email)
+      .single();
+
+    if (error || !user) return fail(res, "User not found.", 404);
+
+    if (user.is_verified)
+      return ok(res, { message: "Email is already verified. You can log in." });
+
+    if (user.verification_token !== token)
+      return fail(res, "Invalid verification token.", 400);
+
+    // ── Mark as verified ──
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        is_verified: true,
+        verification_token: null,
+      })
+      .eq("id", user.id);
+
+    return ok(res, {
+      message: "Email verified successfully! You can now log in.",
+    });
+  } catch (err) {
+    console.error("[Auth] verifyEmail error:", err.message);
+    return fail(res, "Email verification failed.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 7. FORGOT PASSWORD
+// POST /api/auth/forgot-password
+// Body: { email }
+// ─────────────────────────────────────────────
+export const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email?.trim()) return fail(res, "Email is required.");
+
+    const emailLower = email.toLowerCase().trim();
+
+    // ── Look up user ──
+    const { data: user } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, name")
+      .eq("email", emailLower)
+      .single();
+
+    // Always respond the same to prevent email enumeration
+    if (!user) {
+      return ok(res, {
+        message: "If that email exists, a reset link has been sent.",
+      });
+    }
+
+    // ── Generate short-lived reset token ──
+    const resetToken = jwt.sign(
+      { id: user.id, email: emailLower },
+      JWT_SECRET,
+      {
+        expiresIn: "1h",
+      },
+    );
+
+    const resetTokenExpires = new Date(
+      Date.now() + 60 * 60 * 1000,
+    ).toISOString();
+
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        reset_token: resetToken,
+        reset_token_expires: resetTokenExpires,
+      })
+      .eq("id", user.id);
+
+    // ── Send reset email ──
+    const resetUrl = `${CLIENT_URL}/reset-password?token=${resetToken}`;
+    await sendEmail({
+      to: emailLower,
+      subject: "Reset your password — Research Portfolio",
+      html: `
+        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#0f172a;color:#e2e8f0;border-radius:16px;">
+          <h2 style="color:#3b82f6;margin-bottom:8px;">Password Reset Request</h2>
+          <p style="color:#94a3b8;">Hi ${user.name}, we received a request to reset your password.</p>
+          <p style="color:#94a3b8;margin-bottom:24px;">Click the button below to reset it. This link expires in <strong style="color:#f59e0b;">1 hour</strong>.</p>
+          <a href="${resetUrl}"
+            style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#3b82f6,#10b981);
+            color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:14px;">
+            Reset Password
+          </a>
+          <p style="color:#475569;font-size:12px;margin-top:24px;">If you didn't request this, you can safely ignore this email. Your password won't change.</p>
+        </div>
+      `,
+    }).catch((err) => console.warn("[Auth] Reset email failed:", err.message));
+
+    return ok(res, {
+      message: "If that email exists, a reset link has been sent.",
+    });
+  } catch (err) {
+    console.error("[Auth] forgotPassword error:", err.message);
+    return fail(res, "Password reset request failed.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 8. RESET PASSWORD
+// POST /api/auth/reset-password
+// Body: { token, newPassword, confirmPassword }
+// ─────────────────────────────────────────────
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body;
+
+    if (!token) return fail(res, "Reset token is required.");
+    if (!newPassword) return fail(res, "New password is required.");
+    if (!confirmPassword) return fail(res, "Please confirm your new password.");
+    if (newPassword !== confirmPassword)
+      return fail(res, "Passwords do not match.");
+    if (newPassword.length < 8)
+      return fail(res, "Password must be at least 8 characters.");
+
+    // ── Verify token ──
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return fail(res, "Reset link is invalid or has expired.", 400);
+    }
+
+    // ── Fetch user + validate stored token ──
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, reset_token, reset_token_expires")
+      .eq("id", decoded.id)
+      .single();
+
+    if (error || !user) return fail(res, "User not found.", 404);
+
+    if (user.reset_token !== token)
+      return fail(res, "Invalid reset token.", 400);
+
+    if (new Date(user.reset_token_expires) < new Date())
+      return fail(
+        res,
+        "Reset link has expired. Please request a new one.",
+        400,
+      );
+
+    // ── Hash new password ──
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+    // ── Update password, clear reset token and all sessions ──
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        password: hashedPassword,
+        reset_token: null,
+        reset_token_expires: null,
+        refresh_token: null, // Force re-login everywhere
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", user.id);
+
+    return ok(res, {
+      message: "Password reset successfully. You can now log in.",
+    });
+  } catch (err) {
+    console.error("[Auth] resetPassword error:", err.message);
+    return fail(res, "Password reset failed.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 9. CHANGE PASSWORD  (authenticated)
+// PUT /api/auth/change-password
+// Headers: Authorization: Bearer <token>
+// Body: { currentPassword, newPassword, confirmPassword }
+// ─────────────────────────────────────────────
+export const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    if (!currentPassword) return fail(res, "Current password is required.");
+    if (!newPassword) return fail(res, "New password is required.");
+    if (newPassword !== confirmPassword)
+      return fail(res, "Passwords do not match.");
+    if (newPassword.length < 8)
+      return fail(res, "New password must be at least 8 characters.");
+    if (currentPassword === newPassword)
+      return fail(
+        res,
+        "New password must be different from the current password.",
+      );
+
+    // ── Fetch user with password ──
+    const { data: user, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, password")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error || !user) return fail(res, "User not found.", 404);
+
+    // ── Verify current password ──
+    const match = await bcrypt.compare(currentPassword, user.password);
+    if (!match) return fail(res, "Current password is incorrect.", 401);
+
+    // ── Hash + update ──
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        password: hashedPassword,
+        refresh_token: null, // Force re-login on all devices
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", req.user.id);
+
+    // Clear cookie on this device
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return ok(res, {
+      message: "Password changed successfully. Please log in again.",
+    });
+  } catch (err) {
+    console.error("[Auth] changePassword error:", err.message);
+    return fail(res, "Password change failed.", 500);
+  }
+};
