@@ -1,3 +1,4 @@
+// src/routes/AppRoutes.jsx
 import { Routes, Route, Navigate } from "react-router-dom";
 
 import MainLayout from "../layouts/MainLayout";
@@ -18,6 +19,8 @@ import Contact from "../pages/public/Contact";
 /* ---- AUTH ---- */
 import Login from "../pages/auth/Login";
 import Signup from "../pages/auth/Signup";
+import ForgotPassword from "../pages/auth/ForgotPassword";
+import ResetPassword from "../pages/auth/ResetPassword";
 
 /* ---- ADMIN ---- */
 import Dashboard from "../pages/admin/Dashboard";
@@ -47,6 +50,8 @@ function AppRoutes() {
       {/* AUTH */}
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
 
       {/* ADMIN */}
       <Route element={<ProtectedRoute adminOnly />}>

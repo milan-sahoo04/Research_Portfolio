@@ -447,7 +447,7 @@ export const googleCallback = async (req, res) => {
     console.log(`[Auth] ✅ Google login: ${emailLower}`);
 
     return res.redirect(
-      `${CLIENT_URL}/dashboard?token=${accessToken}&provider=google`,
+      `${CLIENT_URL}/login?token=${accessToken}&provider=google`,
     );
   } catch (err) {
     console.error("[Auth] googleCallback error:", err.message);

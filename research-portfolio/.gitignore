@@ -6,6 +6,13 @@
 /backend/.env.*.local
 
 # =======================
+# Frontend environment variables
+# =======================
+/frontend/.env
+/frontend/.env.local
+/frontend/.env.*.local
+
+# =======================
 # Logs
 # =======================
 logs

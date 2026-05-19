@@ -13,6 +13,9 @@ import {
   forgotPassword,
   resetPassword,
   changePassword,
+  googleAuth,
+  googleCallback,
+  getAdminInfo,
 } from "../controllers/authController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { requireVerified } from "../middleware/roleMiddleware.js";
@@ -22,7 +25,14 @@ const router = express.Router();
 // ─────────────────────────────────────────────
 // PUBLIC ROUTES  (no token required)
 // ─────────────────────────────────────────────
+// GET  /api/auth/google
+router.get("/google", googleAuth);
 
+// GET  /api/auth/google/callback
+router.get("/google/callback", googleCallback);
+
+// GET  /api/auth/admin/info
+router.get("/admin/info", getAdminInfo);
 // POST /api/auth/signup
 // Body: { name, email, password, role? }
 router.post("/signup", signup);
