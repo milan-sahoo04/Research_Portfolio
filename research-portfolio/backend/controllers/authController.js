@@ -1,8 +1,8 @@
+/* eslint-disable no-undef */
 // ─────────────────────────────────────────────────────────────────────────────
 // backend/controllers/authController.js
-// Handles: signup, login, logout, getMe, forgotPassword,
-//          resetPassword, verifyEmail, refreshToken
 // ─────────────────────────────────────────────────────────────────────────────
+
 import dotenv from "dotenv";
 dotenv.config();
 import bcrypt from "bcrypt";
@@ -19,99 +19,140 @@ const JWT_REFRESH_EXPIRES = process.env.JWT_REFRESH_EXPIRES || "7d";
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const SERVER_URL = process.env.SERVER_URL || "http://localhost:5000";
+
+// ── Hardcoded Admin (set these in .env) ──
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@researchportfolio.com";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@123456";
+const ADMIN_NAME = process.env.ADMIN_NAME || "Admin";
+
+// ── Google OAuth (set these in .env) ──
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
 // ─────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────
-
-/** Generate access + refresh token pair for a user record */
 function generateTokens(user) {
-  const payload = {
-    id: user.id,
-    email: user.email,
-    role: user.role,
-  };
-
+  const payload = { id: user.id, email: user.email, role: user.role };
   const accessToken = jwt.sign(payload, JWT_SECRET, {
     expiresIn: JWT_ACCESS_EXPIRES,
   });
-
   const refreshToken = jwt.sign({ id: user.id }, JWT_REFRESH_SECRET, {
     expiresIn: JWT_REFRESH_EXPIRES,
   });
-
   return { accessToken, refreshToken };
 }
 
-/** Strip sensitive fields before sending user to client */
 function sanitizeUser(user) {
-  const {
-    password,
-    reset_token,
-    reset_token_expires,
-    verification_token,
-    ...safe
-  } = user;
+  // eslint-disable-next-line no-unused-vars
+  const { ...safe } = user;
   return safe;
 }
 
-/** Send a standardised success response */
 function ok(res, data = {}, statusCode = 200) {
   return res.status(statusCode).json({ success: true, ...data });
 }
 
-/** Send a standardised error response */
 function fail(res, message, statusCode = 400) {
   return res.status(statusCode).json({ success: false, message });
+}
+
+function setRefreshCookie(res, token) {
+  res.cookie("refreshToken", token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+}
+
+// ─────────────────────────────────────────────
+// ADMIN BOOTSTRAP
+// Auto-creates the admin row in DB on first login
+// ─────────────────────────────────────────────
+async function ensureAdminExists() {
+  const { data: existing } = await supabaseAdmin
+    .from(TABLES.USERS)
+    .select("*")
+    .eq("email", ADMIN_EMAIL.toLowerCase())
+    .single();
+
+  if (existing) return existing;
+
+  const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, SALT_ROUNDS);
+
+  const { data: newAdmin, error } = await supabaseAdmin
+    .from(TABLES.USERS)
+    .insert({
+      name: ADMIN_NAME,
+      email: ADMIN_EMAIL.toLowerCase(),
+      password: hashedPassword,
+      role: "admin",
+      is_verified: true,
+      is_active: true,
+      verification_token: null,
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Admin bootstrap failed: ${error.message}`);
+  console.log(`[Auth] ✅ Admin bootstrapped: ${ADMIN_EMAIL}`);
+  return newAdmin;
 }
 
 // ─────────────────────────────────────────────
 // 1. SIGNUP
 // POST /api/auth/signup
-// Body: { name, email, password, role? }
+// Body: { name, email, password }
+// Only creates "user" role — admin is hardcoded
 // ─────────────────────────────────────────────
 export const signup = async (req, res) => {
   try {
-    const { name, email, password, role = "user" } = req.body;
+    const { name, email, password } = req.body;
 
-    // ── Basic validation ──
     if (!name?.trim()) return fail(res, "Name is required.");
     if (!email?.trim()) return fail(res, "Email is required.");
     if (!password) return fail(res, "Password is required.");
     if (password.length < 8)
       return fail(res, "Password must be at least 8 characters.");
-    if (!["admin", "user"].includes(role))
-      return fail(res, "Invalid role. Must be 'admin' or 'user'.");
 
     const emailLower = email.toLowerCase().trim();
 
-    // ── Check if email already exists ──
+    // Block registration with hardcoded admin email
+    if (emailLower === ADMIN_EMAIL.toLowerCase()) {
+      return fail(
+        res,
+        "This email is reserved. Please use a different email.",
+        409,
+      );
+    }
+
     const { data: existing } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("id")
       .eq("email", emailLower)
       .single();
 
-    if (existing)
+    if (existing) {
       return fail(res, "An account with this email already exists.", 409);
+    }
 
-    // ── Hash password ──
     const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-
-    // ── Generate email verification token ──
     const verificationToken = jwt.sign({ email: emailLower }, JWT_SECRET, {
       expiresIn: "24h",
     });
 
-    // ── Insert user into DB ──
     const { data: newUser, error: insertError } = await supabaseAdmin
       .from(TABLES.USERS)
       .insert({
         name: name.trim(),
         email: emailLower,
         password: hashedPassword,
-        role,
+        role: "user", // always "user" — no role selection on signup
         is_verified: false,
+        is_active: true,
         verification_token: verificationToken,
         created_at: new Date().toISOString(),
       })
@@ -120,25 +161,29 @@ export const signup = async (req, res) => {
 
     if (insertError) throw new Error(insertError.message);
 
-    // ── Send verification email ──
     const verifyUrl = `${CLIENT_URL}/verify-email?token=${verificationToken}`;
     await sendEmail({
       to: emailLower,
       subject: "Verify your email — Research Portfolio",
       html: `
-        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#0f172a;color:#e2e8f0;border-radius:16px;">
+        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;
+          background:#0f172a;color:#e2e8f0;border-radius:16px;">
           <h2 style="color:#3b82f6;margin-bottom:8px;">Welcome, ${name.trim()}! 👋</h2>
-          <p style="color:#94a3b8;margin-bottom:24px;">Thanks for signing up. Please verify your email to activate your account.</p>
+          <p style="color:#94a3b8;margin-bottom:24px;">
+            Please verify your email to activate your account.
+          </p>
           <a href="${verifyUrl}"
-            style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#3b82f6,#10b981);
+            style="display:inline-block;padding:12px 28px;
+            background:linear-gradient(135deg,#3b82f6,#10b981);
             color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:14px;">
             Verify Email
           </a>
-          <p style="color:#475569;font-size:12px;margin-top:24px;">This link expires in 24 hours. If you didn't create an account, ignore this email.</p>
-        </div>
-      `,
-    }).catch((err) =>
-      console.warn("[Auth] Verification email failed:", err.message),
+          <p style="color:#475569;font-size:12px;margin-top:24px;">
+            This link expires in 24 hours.
+          </p>
+        </div>`,
+    }).catch((e) =>
+      console.warn("[Auth] Verification email failed:", e.message),
     );
 
     return ok(
@@ -157,7 +202,7 @@ export const signup = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 2. LOGIN
+// 2. LOGIN  (regular users + admin via same route)
 // POST /api/auth/login
 // Body: { email, password }
 // ─────────────────────────────────────────────
@@ -170,7 +215,49 @@ export const login = async (req, res) => {
 
     const emailLower = email.toLowerCase().trim();
 
-    // ── Fetch user ──
+    // ── ADMIN PATH ──
+    if (emailLower === ADMIN_EMAIL.toLowerCase()) {
+      if (password !== ADMIN_PASSWORD) {
+        return fail(res, "Invalid admin credentials.", 401);
+      }
+
+      const admin = await ensureAdminExists();
+
+      // Sync password hash if ADMIN_PASSWORD changed in .env
+      const hashMatch = await bcrypt.compare(ADMIN_PASSWORD, admin.password);
+      if (!hashMatch) {
+        const newHash = await bcrypt.hash(ADMIN_PASSWORD, SALT_ROUNDS);
+        await supabaseAdmin
+          .from(TABLES.USERS)
+          .update({ password: newHash })
+          .eq("id", admin.id);
+        admin.password = newHash;
+      }
+
+      const { accessToken, refreshToken } = generateTokens(admin);
+      const hashedRefresh = await bcrypt.hash(refreshToken, 10);
+
+      await supabaseAdmin
+        .from(TABLES.USERS)
+        .update({
+          refresh_token: hashedRefresh,
+          last_login: new Date().toISOString(),
+          is_verified: true,
+          is_active: true,
+        })
+        .eq("id", admin.id);
+
+      setRefreshCookie(res, refreshToken);
+      console.log(`[Auth] 🔐 Admin login: ${emailLower}`);
+
+      return ok(res, {
+        message: "Admin logged in successfully.",
+        accessToken,
+        user: sanitizeUser(admin),
+      });
+    }
+
+    // ── REGULAR USER PATH ──
     const { data: user, error } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("*")
@@ -179,19 +266,24 @@ export const login = async (req, res) => {
 
     if (error || !user) return fail(res, "Invalid email or password.", 401);
 
-    // ── Compare password ──
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) return fail(res, "Invalid email or password.", 401);
 
-    // ── Check email verification ──
-    if (!user.is_verified)
+    if (!user.is_verified) {
       return fail(res, "Please verify your email before logging in.", 403);
+    }
 
-    // ── Generate tokens ──
+    if (user.is_active === false) {
+      return fail(
+        res,
+        "Your account has been deactivated. Contact support.",
+        403,
+      );
+    }
+
     const { accessToken, refreshToken } = generateTokens(user);
-
-    // ── Store hashed refresh token in DB ──
     const hashedRefresh = await bcrypt.hash(refreshToken, 10);
+
     await supabaseAdmin
       .from(TABLES.USERS)
       .update({
@@ -200,13 +292,7 @@ export const login = async (req, res) => {
       })
       .eq("id", user.id);
 
-    // ── Set refresh token as httpOnly cookie ──
-    res.cookie("refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
-    });
+    setRefreshCookie(res, refreshToken);
 
     return ok(res, {
       message: "Logged in successfully.",
@@ -220,23 +306,168 @@ export const login = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 3. LOGOUT
+// 3. GOOGLE OAUTH — Step 1: Redirect to Google
+// GET /api/auth/google
+// ─────────────────────────────────────────────
+export const googleAuth = (req, res) => {
+  if (!GOOGLE_CLIENT_ID) {
+    return fail(res, "Google OAuth is not configured on this server.", 501);
+  }
+
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: `${SERVER_URL}/api/auth/google/callback`,
+    response_type: "code",
+    scope: "openid email profile",
+    access_type: "offline",
+    prompt: "select_account",
+  });
+
+  return res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+};
+
+// ─────────────────────────────────────────────
+// 4. GOOGLE OAUTH — Step 2: Callback
+// GET /api/auth/google/callback?code=...
+// ─────────────────────────────────────────────
+export const googleCallback = async (req, res) => {
+  try {
+    const { code, error: oauthError } = req.query;
+
+    if (oauthError || !code) {
+      console.warn("[Auth] Google OAuth denied:", oauthError);
+      return res.redirect(`${CLIENT_URL}/login?error=google_denied`);
+    }
+
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+      return res.redirect(`${CLIENT_URL}/login?error=oauth_not_configured`);
+    }
+
+    // Exchange code for access token
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: `${SERVER_URL}/api/auth/google/callback`,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    const tokenData = await tokenRes.json();
+
+    if (!tokenRes.ok || tokenData.error) {
+      console.error("[Auth] Google token exchange failed:", tokenData.error);
+      return res.redirect(`${CLIENT_URL}/login?error=google_token_failed`);
+    }
+
+    // Fetch Google user profile
+    const profileRes = await fetch(
+      "https://www.googleapis.com/oauth2/v2/userinfo",
+      { headers: { Authorization: `Bearer ${tokenData.access_token}` } },
+    );
+    const googleUser = await profileRes.json();
+
+    if (!googleUser.email) {
+      return res.redirect(`${CLIENT_URL}/login?error=google_no_email`);
+    }
+
+    const emailLower = googleUser.email.toLowerCase();
+
+    // Admin cannot use Google OAuth — must use email/password
+    if (emailLower === ADMIN_EMAIL.toLowerCase()) {
+      return res.redirect(`${CLIENT_URL}/login?error=admin_use_password`);
+    }
+
+    // Find or create user — always "user" role for Google OAuth
+    let { data: user } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("*")
+      .eq("email", emailLower)
+      .single();
+
+    if (!user) {
+      const { data: created, error: createErr } = await supabaseAdmin
+        .from(TABLES.USERS)
+        .insert({
+          name: googleUser.name || emailLower.split("@")[0],
+          email: emailLower,
+          password: await bcrypt.hash(
+            `google_${Date.now()}_${Math.random()}`,
+            10,
+          ),
+          role: "user",
+          is_verified: true,
+          is_active: true,
+          profile_pic: googleUser.picture || null,
+          verification_token: null,
+          created_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+      if (createErr) {
+        console.error("[Auth] Google user create error:", createErr.message);
+        return res.redirect(
+          `${CLIENT_URL}/login?error=account_creation_failed`,
+        );
+      }
+      user = created;
+      console.log(`[Auth] 🆕 Google user created: ${emailLower}`);
+    } else {
+      // Update profile pic if missing
+      if (!user.profile_pic && googleUser.picture) {
+        await supabaseAdmin
+          .from(TABLES.USERS)
+          .update({ profile_pic: googleUser.picture })
+          .eq("id", user.id);
+        user.profile_pic = googleUser.picture;
+      }
+    }
+
+    if (user.is_active === false) {
+      return res.redirect(`${CLIENT_URL}/login?error=account_deactivated`);
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user);
+    const hashedRefresh = await bcrypt.hash(refreshToken, 10);
+
+    await supabaseAdmin
+      .from(TABLES.USERS)
+      .update({
+        refresh_token: hashedRefresh,
+        last_login: new Date().toISOString(),
+        is_verified: true,
+      })
+      .eq("id", user.id);
+
+    setRefreshCookie(res, refreshToken);
+    console.log(`[Auth] ✅ Google login: ${emailLower}`);
+
+    return res.redirect(
+      `${CLIENT_URL}/dashboard?token=${accessToken}&provider=google`,
+    );
+  } catch (err) {
+    console.error("[Auth] googleCallback error:", err.message);
+    return res.redirect(`${CLIENT_URL}/login?error=google_failed`);
+  }
+};
+
+// ─────────────────────────────────────────────
+// 5. LOGOUT
 // POST /api/auth/logout
-// Headers: Authorization: Bearer <token>
 // ─────────────────────────────────────────────
 export const logout = async (req, res) => {
   try {
-    const userId = req.user?.id;
-
-    if (userId) {
-      // Clear refresh token from DB
+    if (req.user?.id) {
       await supabaseAdmin
         .from(TABLES.USERS)
         .update({ refresh_token: null })
-        .eq("id", userId);
+        .eq("id", req.user.id);
     }
 
-    // Clear cookie
     res.clearCookie("refreshToken", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -251,9 +482,8 @@ export const logout = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 4. GET ME (current user)
+// 6. GET ME
 // GET /api/auth/me
-// Headers: Authorization: Bearer <token>
 // ─────────────────────────────────────────────
 export const getMe = async (req, res) => {
   try {
@@ -264,7 +494,6 @@ export const getMe = async (req, res) => {
       .single();
 
     if (error || !user) return fail(res, "User not found.", 404);
-
     return ok(res, { user: sanitizeUser(user) });
   } catch (err) {
     console.error("[Auth] getMe error:", err.message);
@@ -273,16 +502,14 @@ export const getMe = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 5. REFRESH TOKEN
+// 7. REFRESH TOKEN
 // POST /api/auth/refresh
-// Cookie: refreshToken
 // ─────────────────────────────────────────────
 export const refreshToken = async (req, res) => {
   try {
     const token = req.cookies?.refreshToken;
     if (!token) return fail(res, "No refresh token provided.", 401);
 
-    // ── Verify refresh token ──
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_REFRESH_SECRET);
@@ -290,21 +517,19 @@ export const refreshToken = async (req, res) => {
       return fail(res, "Invalid or expired refresh token.", 401);
     }
 
-    // ── Fetch user + stored hashed refresh token ──
     const { data: user, error } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("*")
       .eq("id", decoded.id)
       .single();
 
-    if (error || !user || !user.refresh_token)
+    if (error || !user || !user.refresh_token) {
       return fail(res, "Invalid refresh token.", 401);
+    }
 
-    // ── Compare tokens ──
     const tokenMatch = await bcrypt.compare(token, user.refresh_token);
     if (!tokenMatch) return fail(res, "Invalid refresh token.", 401);
 
-    // ── Rotate: generate new pair ──
     const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
     const hashedRefresh = await bcrypt.hash(newRefreshToken, 10);
 
@@ -313,13 +538,7 @@ export const refreshToken = async (req, res) => {
       .update({ refresh_token: hashedRefresh })
       .eq("id", user.id);
 
-    res.cookie("refreshToken", newRefreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
+    setRefreshCookie(res, newRefreshToken);
     return ok(res, { accessToken, user: sanitizeUser(user) });
   } catch (err) {
     console.error("[Auth] refreshToken error:", err.message);
@@ -328,15 +547,14 @@ export const refreshToken = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 6. VERIFY EMAIL
-// GET /api/auth/verify-email?token=<token>
+// 8. VERIFY EMAIL
+// GET /api/auth/verify-email?token=
 // ─────────────────────────────────────────────
 export const verifyEmail = async (req, res) => {
   try {
     const { token } = req.query;
     if (!token) return fail(res, "Verification token is required.");
 
-    // ── Decode token ──
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
@@ -344,7 +562,6 @@ export const verifyEmail = async (req, res) => {
       return fail(res, "Verification link is invalid or has expired.", 400);
     }
 
-    // ── Find user by email + token ──
     const { data: user, error } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("id, is_verified, verification_token")
@@ -352,20 +569,18 @@ export const verifyEmail = async (req, res) => {
       .single();
 
     if (error || !user) return fail(res, "User not found.", 404);
-
-    if (user.is_verified)
-      return ok(res, { message: "Email is already verified. You can log in." });
-
-    if (user.verification_token !== token)
+    if (user.is_verified) {
+      return ok(res, {
+        message: "Email is already verified. You can log in.",
+      });
+    }
+    if (user.verification_token !== token) {
       return fail(res, "Invalid verification token.", 400);
+    }
 
-    // ── Mark as verified ──
     await supabaseAdmin
       .from(TABLES.USERS)
-      .update({
-        is_verified: true,
-        verification_token: null,
-      })
+      .update({ is_verified: true, verification_token: null })
       .eq("id", user.id);
 
     return ok(res, {
@@ -378,7 +593,7 @@ export const verifyEmail = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 7. FORGOT PASSWORD
+// 9. FORGOT PASSWORD
 // POST /api/auth/forgot-password
 // Body: { email }
 // ─────────────────────────────────────────────
@@ -389,29 +604,30 @@ export const forgotPassword = async (req, res) => {
 
     const emailLower = email.toLowerCase().trim();
 
-    // ── Look up user ──
-    const { data: user } = await supabaseAdmin
-      .from(TABLES.USERS)
-      .select("id, name")
-      .eq("email", emailLower)
-      .single();
+    let user;
+    if (emailLower === ADMIN_EMAIL.toLowerCase()) {
+      user = await ensureAdminExists();
+    } else {
+      const { data } = await supabaseAdmin
+        .from(TABLES.USERS)
+        .select("id, name, email")
+        .eq("email", emailLower)
+        .single();
+      user = data;
+    }
 
-    // Always respond the same to prevent email enumeration
+    // Same response regardless — prevents email enumeration
     if (!user) {
       return ok(res, {
         message: "If that email exists, a reset link has been sent.",
       });
     }
 
-    // ── Generate short-lived reset token ──
     const resetToken = jwt.sign(
       { id: user.id, email: emailLower },
       JWT_SECRET,
-      {
-        expiresIn: "1h",
-      },
+      { expiresIn: "1h" },
     );
-
     const resetTokenExpires = new Date(
       Date.now() + 60 * 60 * 1000,
     ).toISOString();
@@ -424,25 +640,32 @@ export const forgotPassword = async (req, res) => {
       })
       .eq("id", user.id);
 
-    // ── Send reset email ──
     const resetUrl = `${CLIENT_URL}/reset-password?token=${resetToken}`;
+    console.log(`[Auth] Password reset URL (dev): ${resetUrl}`);
+
     await sendEmail({
       to: emailLower,
       subject: "Reset your password — Research Portfolio",
       html: `
-        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;background:#0f172a;color:#e2e8f0;border-radius:16px;">
+        <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px;
+          background:#0f172a;color:#e2e8f0;border-radius:16px;">
           <h2 style="color:#3b82f6;margin-bottom:8px;">Password Reset Request</h2>
-          <p style="color:#94a3b8;">Hi ${user.name}, we received a request to reset your password.</p>
-          <p style="color:#94a3b8;margin-bottom:24px;">Click the button below to reset it. This link expires in <strong style="color:#f59e0b;">1 hour</strong>.</p>
+          <p style="color:#94a3b8;">Hi ${user.name},</p>
+          <p style="color:#94a3b8;margin-bottom:24px;">
+            Click below to reset your password.
+            This link expires in <strong style="color:#f59e0b;">1 hour</strong>.
+          </p>
           <a href="${resetUrl}"
-            style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#3b82f6,#10b981);
+            style="display:inline-block;padding:12px 28px;
+            background:linear-gradient(135deg,#3b82f6,#10b981);
             color:#fff;text-decoration:none;border-radius:10px;font-weight:600;font-size:14px;">
             Reset Password
           </a>
-          <p style="color:#475569;font-size:12px;margin-top:24px;">If you didn't request this, you can safely ignore this email. Your password won't change.</p>
-        </div>
-      `,
-    }).catch((err) => console.warn("[Auth] Reset email failed:", err.message));
+          <p style="color:#475569;font-size:12px;margin-top:24px;">
+            If you didn't request this, you can safely ignore this email.
+          </p>
+        </div>`,
+    }).catch((e) => console.warn("[Auth] Reset email failed:", e.message));
 
     return ok(res, {
       message: "If that email exists, a reset link has been sent.",
@@ -454,7 +677,7 @@ export const forgotPassword = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 8. RESET PASSWORD
+// 10. RESET PASSWORD
 // POST /api/auth/reset-password
 // Body: { token, newPassword, confirmPassword }
 // ─────────────────────────────────────────────
@@ -465,12 +688,13 @@ export const resetPassword = async (req, res) => {
     if (!token) return fail(res, "Reset token is required.");
     if (!newPassword) return fail(res, "New password is required.");
     if (!confirmPassword) return fail(res, "Please confirm your new password.");
-    if (newPassword !== confirmPassword)
+    if (newPassword !== confirmPassword) {
       return fail(res, "Passwords do not match.");
-    if (newPassword.length < 8)
+    }
+    if (newPassword.length < 8) {
       return fail(res, "Password must be at least 8 characters.");
+    }
 
-    // ── Verify token ──
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
@@ -478,39 +702,42 @@ export const resetPassword = async (req, res) => {
       return fail(res, "Reset link is invalid or has expired.", 400);
     }
 
-    // ── Fetch user + validate stored token ──
     const { data: user, error } = await supabaseAdmin
       .from(TABLES.USERS)
-      .select("id, reset_token, reset_token_expires")
+      .select("id, reset_token, reset_token_expires, email")
       .eq("id", decoded.id)
       .single();
 
     if (error || !user) return fail(res, "User not found.", 404);
-
-    if (user.reset_token !== token)
+    if (user.reset_token !== token) {
       return fail(res, "Invalid reset token.", 400);
-
-    if (new Date(user.reset_token_expires) < new Date())
+    }
+    if (new Date(user.reset_token_expires) < new Date()) {
       return fail(
         res,
         "Reset link has expired. Please request a new one.",
         400,
       );
+    }
 
-    // ── Hash new password ──
     const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-    // ── Update password, clear reset token and all sessions ──
     await supabaseAdmin
       .from(TABLES.USERS)
       .update({
         password: hashedPassword,
         reset_token: null,
         reset_token_expires: null,
-        refresh_token: null, // Force re-login everywhere
+        refresh_token: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", user.id);
+
+    if (user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+      console.warn(
+        "[Auth] ⚠️  Admin password reset via email. Update ADMIN_PASSWORD in .env too.",
+      );
+    }
 
     return ok(res, {
       message: "Password reset successfully. You can now log in.",
@@ -522,9 +749,8 @@ export const resetPassword = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// 9. CHANGE PASSWORD  (authenticated)
+// 11. CHANGE PASSWORD  (authenticated)
 // PUT /api/auth/change-password
-// Headers: Authorization: Bearer <token>
 // Body: { currentPassword, newPassword, confirmPassword }
 // ─────────────────────────────────────────────
 export const changePassword = async (req, res) => {
@@ -533,17 +759,16 @@ export const changePassword = async (req, res) => {
 
     if (!currentPassword) return fail(res, "Current password is required.");
     if (!newPassword) return fail(res, "New password is required.");
-    if (newPassword !== confirmPassword)
+    if (newPassword !== confirmPassword) {
       return fail(res, "Passwords do not match.");
-    if (newPassword.length < 8)
+    }
+    if (newPassword.length < 8) {
       return fail(res, "New password must be at least 8 characters.");
-    if (currentPassword === newPassword)
-      return fail(
-        res,
-        "New password must be different from the current password.",
-      );
+    }
+    if (currentPassword === newPassword) {
+      return fail(res, "New password must be different from current password.");
+    }
 
-    // ── Fetch user with password ──
     const { data: user, error } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("id, password")
@@ -552,22 +777,20 @@ export const changePassword = async (req, res) => {
 
     if (error || !user) return fail(res, "User not found.", 404);
 
-    // ── Verify current password ──
     const match = await bcrypt.compare(currentPassword, user.password);
     if (!match) return fail(res, "Current password is incorrect.", 401);
 
-    // ── Hash + update ──
     const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
     await supabaseAdmin
       .from(TABLES.USERS)
       .update({
         password: hashedPassword,
-        refresh_token: null, // Force re-login on all devices
+        refresh_token: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", req.user.id);
 
-    // Clear cookie on this device
     res.clearCookie("refreshToken", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -581,4 +804,16 @@ export const changePassword = async (req, res) => {
     console.error("[Auth] changePassword error:", err.message);
     return fail(res, "Password change failed.", 500);
   }
+};
+
+// ─────────────────────────────────────────────
+// 12. GET ADMIN INFO  (public — for login page)
+// GET /api/auth/admin/info
+// ─────────────────────────────────────────────
+export const getAdminInfo = (_req, res) => {
+  return ok(res, {
+    email: ADMIN_EMAIL,
+    name: ADMIN_NAME,
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID),
+  });
 };

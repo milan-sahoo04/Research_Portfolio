@@ -1,430 +1,302 @@
-const nodemailer = require("nodemailer");
+/* eslint-disable no-undef */
+// ─────────────────────────────────────────────────────────────────────────────
+// backend/utils/email.js
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Transporter ──────────────────────────────────────────────────────────────
-// Single shared transporter — created once, reused for all sends.
-let transporter = null;
+import nodemailer from "nodemailer";
+import dotenv from "dotenv";
+dotenv.config();
 
-const getTransporter = () => {
-  if (transporter) return transporter;
+// ─────────────────────────────────────────────
+// TRANSPORTER
+// ─────────────────────────────────────────────
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST || "smtp.gmail.com",
+  port: Number(process.env.EMAIL_PORT) || 587,
+  secure: process.env.EMAIL_SECURE === "true",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+  tls: { rejectUnauthorized: process.env.NODE_ENV === "production" },
+});
 
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT, 10) || 587,
-    secure: process.env.SMTP_PORT === "465", // true for port 465, false for 587
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-    pool: true, // reuse connections
-    maxConnections: 5,
-    maxMessages: 100,
-  });
-
-  return transporter;
-};
-
-// ─── Base sender ──────────────────────────────────────────────────────────────
-const sendEmail = async ({ to, subject, html, text, attachments = [] }) => {
-  try {
-    const transport = getTransporter();
-
-    const info = await transport.sendMail({
-      from: `"${process.env.FROM_NAME || "Research Portfolio"}" <${process.env.SMTP_USER}>`,
-      to,
-      subject,
-      html,
-      text: text || html.replace(/<[^>]*>/g, ""), // strip HTML for plain text fallback
-      attachments,
-    });
-
-    if (process.env.NODE_ENV === "development") {
-      console.log(`✉️  Email sent to ${to} — MessageId: ${info.messageId}`);
-    }
-
-    return { success: true, messageId: info.messageId };
-  } catch (err) {
-    console.error(`❌ Email send failed to ${to}:`, err.message);
-    // Don't throw — let the caller decide whether to surface this to the user
-    return { success: false, error: err.message };
+// Verify on startup (non-blocking)
+transporter.verify((err) => {
+  if (err) {
+    console.warn("[Email] ⚠️  SMTP not ready:", err.message);
+    console.warn("[Email] Set EMAIL_HOST/USER/PASS in .env to enable emails.");
+  } else {
+    console.log("[Email] ✅ SMTP transporter ready.");
   }
-};
+});
 
-// ─── Shared HTML shell ────────────────────────────────────────────────────────
-const emailShell = ({ title, previewText, bodyHtml }) => `
-<!DOCTYPE html>
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+function stripHtml(html = "") {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
+function baseTemplate(content) {
+  return `<!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${title}</title>
-  <meta name="description" content="${previewText}" />
-  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:'Segoe UI',Arial,sans-serif;">
-  <!-- Preview text (hidden) -->
-  <div style="display:none;max-height:0;overflow:hidden;color:#f3f4f6;">${previewText}</div>
-
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
-
-          <!-- Header -->
-          <tr>
-            <td style="background:linear-gradient(135deg,#1e3a5f,#1d4ed8);border-radius:12px 12px 0 0;padding:32px 40px;text-align:center;">
-              <div style="display:inline-flex;align-items:center;gap:10px;">
-                <div style="width:36px;height:36px;background:rgba(255,255,255,0.2);border-radius:8px;display:inline-block;line-height:36px;text-align:center;">
-                  <span style="font-size:20px;">🎓</span>
-                </div>
-                <span style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:0.3px;">Research Portfolio</span>
-              </div>
-            </td>
-          </tr>
-
-          <!-- Body -->
-          <tr>
-            <td style="background:#ffffff;padding:40px;border-left:1px solid #e5e7eb;border-right:1px solid #e5e7eb;">
-              ${bodyHtml}
-            </td>
-          </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td style="background:#f9fafb;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 12px 12px;padding:24px 40px;text-align:center;">
-              <p style="margin:0 0 8px;color:#9ca3af;font-size:12px;">
-                This email was sent by Research Portfolio. If you didn't request this, you can safely ignore it.
-              </p>
-              <p style="margin:0;color:#d1d5db;font-size:11px;">
-                © ${new Date().getFullYear()} Research Portfolio · All rights reserved
-              </p>
-            </td>
-          </tr>
-
-        </table>
-      </td>
-    </tr>
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:Inter,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+        style="background:#1e293b;border-radius:16px;overflow:hidden;border:1px solid #334155;">
+        <tr>
+          <td style="background:linear-gradient(135deg,#3b82f6,#10b981);padding:24px 32px;">
+            <h1 style="margin:0;color:#fff;font-size:18px;font-weight:700;letter-spacing:-0.3px;">
+              Research Portfolio
+            </h1>
+          </td>
+        </tr>
+        <tr><td style="padding:32px;">${content}</td></tr>
+        <tr>
+          <td style="padding:20px 32px;border-top:1px solid #334155;">
+            <p style="margin:0;color:#475569;font-size:12px;text-align:center;">
+              This email was sent by Research Portfolio. If you didn't request this, ignore it safely.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
   </table>
-</body>
-</html>
-`;
+</body></html>`;
+}
 
-// ─── Button helper ────────────────────────────────────────────────────────────
-const primaryButton = (text, href) => `
-  <div style="text-align:center;margin:28px 0;">
-    <a href="${href}"
-       style="display:inline-block;background:linear-gradient(135deg,#1d4ed8,#4f46e5);color:#ffffff;
-              text-decoration:none;font-size:15px;font-weight:600;padding:14px 36px;
-              border-radius:8px;letter-spacing:0.3px;box-shadow:0 4px 14px rgba(29,78,216,0.35);">
-      ${text}
-    </a>
-  </div>
-`;
+function ctaButton(href, label) {
+  return `<a href="${href}"
+    style="display:inline-block;margin-top:24px;padding:13px 30px;
+    background:linear-gradient(135deg,#3b82f6,#10b981);
+    color:#fff;text-decoration:none;border-radius:10px;
+    font-weight:600;font-size:14px;letter-spacing:0.2px;">
+    ${label}
+  </a>`;
+}
 
-const warningBox = (text) => `
-  <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 18px;margin:20px 0;">
-    <p style="margin:0;color:#92400e;font-size:13px;">⚠️ &nbsp;${text}</p>
-  </div>
-`;
+// ─────────────────────────────────────────────
+// CORE sendEmail
+// ─────────────────────────────────────────────
+/**
+ * @param {object} options
+ * @param {string} options.to
+ * @param {string} options.subject
+ * @param {string} options.html
+ * @param {string} [options.text]
+ * @param {string} [options.from]
+ */
+export async function sendEmail({ to, subject, html, text, from }) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn(
+      `[Email] ⚠️  Skipping email to ${to} — EMAIL_USER/PASS not set.`,
+    );
+    return { skipped: true };
+  }
 
-const infoBox = (text) => `
-  <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 18px;margin:20px 0;">
-    <p style="margin:0;color:#1e40af;font-size:13px;">ℹ️ &nbsp;${text}</p>
-  </div>
-`;
+  const mailOptions = {
+    from:
+      from ||
+      process.env.EMAIL_FROM ||
+      `Research Portfolio <${process.env.EMAIL_USER}>`,
+    to,
+    subject,
+    html,
+    text: text || stripHtml(html),
+  };
 
-// ─── 1. Welcome / Email Verification ─────────────────────────────────────────
-const sendVerificationEmail = async ({ to, name, verificationUrl }) => {
-  const html = emailShell({
-    title: "Verify your email — Research Portfolio",
-    previewText: "One click to activate your account.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">Welcome, ${name}! 👋</h2>
-      <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Thanks for joining Research Portfolio. Please verify your email address to activate your account and get started.
-      </p>
-      ${primaryButton("Verify Email Address", verificationUrl)}
-      ${warningBox("This link expires in <strong>24 hours</strong>. If it expires, request a new one from the login page.")}
-      <p style="margin:20px 0 0;color:#9ca3af;font-size:13px;">
-        Or paste this URL into your browser:<br/>
-        <span style="color:#6b7280;word-break:break-all;">${verificationUrl}</span>
-      </p>
-    `,
-  });
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`[Email] ✅ Sent → ${to} | ${subject}`);
+    return info;
+  } catch (err) {
+    console.error(`[Email] ❌ Failed → ${to}:`, err.message);
+    throw err;
+  }
+}
 
+// ─────────────────────────────────────────────
+// TEMPLATE 1: Email Verification
+// ─────────────────────────────────────────────
+export async function sendVerificationEmail(to, name, verifyUrl) {
+  const html = baseTemplate(`
+    <h2 style="margin:0 0 8px;color:#f1f5f9;font-size:22px;">Welcome, ${name}! 👋</h2>
+    <p style="color:#94a3b8;margin:0 0 6px;line-height:1.6;">
+      Thanks for signing up. Please verify your email to activate your account.
+    </p>
+    <p style="color:#64748b;font-size:13px;margin:0;">
+      This link expires in <strong style="color:#f59e0b;">24 hours</strong>.
+    </p>
+    ${ctaButton(verifyUrl, "Verify Email Address")}
+    <p style="color:#475569;font-size:12px;margin-top:20px;">
+      Or paste: <span style="color:#3b82f6;word-break:break-all;">${verifyUrl}</span>
+    </p>
+  `);
   return sendEmail({
     to,
     subject: "Verify your email — Research Portfolio",
     html,
   });
-};
+}
 
-// ─── 2. Password Reset ────────────────────────────────────────────────────────
-const sendPasswordResetEmail = async ({
-  to,
-  name,
-  resetUrl,
-  expiresInMinutes = 60,
-}) => {
-  const html = emailShell({
-    title: "Reset your password — Research Portfolio",
-    previewText: "We received a password reset request for your account.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">Reset your password</h2>
-      <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Hi <strong>${name}</strong>, we received a request to reset the password for your account.
-        Click the button below to choose a new password.
-      </p>
-      ${primaryButton("Reset Password", resetUrl)}
-      ${warningBox(`This link expires in <strong>${expiresInMinutes} minutes</strong>. If you didn't request a reset, ignore this email — your password won't change.`)}
-      <p style="margin:20px 0 0;color:#9ca3af;font-size:13px;">
-        Or paste this URL into your browser:<br/>
-        <span style="color:#6b7280;word-break:break-all;">${resetUrl}</span>
-      </p>
-    `,
-  });
-
+// ─────────────────────────────────────────────
+// TEMPLATE 2: Password Reset
+// ─────────────────────────────────────────────
+export async function sendPasswordResetEmail(to, name, resetUrl) {
+  const html = baseTemplate(`
+    <h2 style="margin:0 0 8px;color:#f1f5f9;font-size:22px;">Password Reset</h2>
+    <p style="color:#94a3b8;margin:0 0 6px;line-height:1.6;">
+      Hi <strong style="color:#f1f5f9;">${name}</strong>, we received a password reset request.
+    </p>
+    <p style="color:#64748b;font-size:13px;margin:0;">
+      Expires in <strong style="color:#f59e0b;">1 hour</strong>.
+    </p>
+    ${ctaButton(resetUrl, "Reset My Password")}
+    <p style="color:#475569;font-size:12px;margin-top:20px;">
+      Or paste: <span style="color:#3b82f6;word-break:break-all;">${resetUrl}</span>
+    </p>
+  `);
   return sendEmail({
     to,
     subject: "Reset your password — Research Portfolio",
     html,
   });
-};
+}
 
-// ─── 3. Password Changed Confirmation ────────────────────────────────────────
-const sendPasswordChangedEmail = async ({ to, name, changedAt }) => {
-  const timeStr = new Date(changedAt).toLocaleString("en-US", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
+// ─────────────────────────────────────────────
+// TEMPLATE 3: Welcome (post-verification)
+// ─────────────────────────────────────────────
+export async function sendWelcomeEmail(to, name) {
+  const html = baseTemplate(`
+    <h2 style="margin:0 0 8px;color:#f1f5f9;font-size:22px;">You're all set, ${name}! 🎉</h2>
+    <p style="color:#94a3b8;margin:0;line-height:1.6;">
+      Your email has been verified. Log in and explore your research portfolio.
+    </p>
+    ${ctaButton(process.env.CLIENT_URL || "http://localhost:5173", "Go to Dashboard")}
+  `);
+  return sendEmail({ to, subject: "Welcome to Research Portfolio 🎉", html });
+}
 
-  const html = emailShell({
-    title: "Your password was changed — Research Portfolio",
-    previewText: "Your account password was recently updated.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">Password changed ✅</h2>
-      <p style="margin:0 0 16px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Hi <strong>${name}</strong>, your Research Portfolio account password was successfully changed on:
-      </p>
-      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:14px 18px;margin:0 0 20px;text-align:center;">
-        <p style="margin:0;color:#374151;font-size:14px;font-weight:600;">${timeStr}</p>
-      </div>
-      ${warningBox("If you didn't make this change, <strong>reset your password immediately</strong> and contact support.")}
-      ${primaryButton("Go to My Account", `${process.env.CLIENT_URL}/login`)}
-    `,
-  });
-
-  return sendEmail({
-    to,
-    subject: "Your password was changed — Research Portfolio",
-    html,
-  });
-};
-
-// ─── 4. Welcome After Verification ───────────────────────────────────────────
-const sendWelcomeEmail = async ({ to, name }) => {
-  const html = emailShell({
-    title: "Welcome to Research Portfolio",
-    previewText: "Your account is ready. Let's get started!",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">You're all set, ${name}! 🎉</h2>
-      <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Your email is verified and your Research Portfolio account is now active. 
-        Explore publications, projects, achievements, and more.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
-        ${[
-          ["📄", "Publications", "Browse and manage research publications."],
-          ["🔬", "Projects", "Showcase your ongoing and completed projects."],
-          ["🏆", "Achievements", "Add patents, awards, and certifications."],
-          ["👥", "Team", "Connect with collaborators and team members."],
-        ]
-          .map(
-            ([icon, title, desc]) => `
-          <tr>
-            <td style="padding:8px 0;vertical-align:top;">
-              <table cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="width:36px;padding-right:12px;vertical-align:top;font-size:20px;">${icon}</td>
-                  <td>
-                    <p style="margin:0 0 2px;color:#111827;font-size:14px;font-weight:600;">${title}</p>
-                    <p style="margin:0;color:#6b7280;font-size:13px;">${desc}</p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-        `,
-          )
-          .join("")}
-      </table>
-      ${primaryButton("Visit My Portfolio", process.env.CLIENT_URL)}
-    `,
-  });
-
-  return sendEmail({ to, subject: "Welcome to Research Portfolio 🎓", html });
-};
-
-// ─── 5. Contact Form — Admin Notification ────────────────────────────────────
-const sendContactNotificationEmail = async ({
+// ─────────────────────────────────────────────
+// TEMPLATE 4: Contact Notification (to admin)
+// Called by feedbackController.submitFeedback
+// ─────────────────────────────────────────────
+/**
+ * @param {object} options
+ * @param {string} options.adminEmail
+ * @param {string} options.senderName
+ * @param {string} options.senderEmail
+ * @param {string} options.subject
+ * @param {string} options.message
+ */
+export async function sendContactNotificationEmail({
   adminEmail,
   senderName,
   senderEmail,
   subject,
   message,
-}) => {
-  const html = emailShell({
-    title: "New contact form submission",
-    previewText: `${senderName} sent you a message via the portfolio.`,
-    bodyHtml: `
-      <h2 style="margin:0 0 16px;color:#111827;font-size:20px;font-weight:700;">📬 New Contact Message</h2>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:0 0 20px;">
-        ${[
-          ["From", senderName],
-          [
-            "Email",
-            `<a href="mailto:${senderEmail}" style="color:#1d4ed8;">${senderEmail}</a>`,
-          ],
-          ["Subject", subject],
-        ]
-          .map(
-            ([label, value]) => `
-          <tr>
-            <td style="padding:12px 16px;background:#f9fafb;border-bottom:1px solid #e5e7eb;width:100px;color:#6b7280;font-size:13px;font-weight:600;">${label}</td>
-            <td style="padding:12px 16px;background:#ffffff;border-bottom:1px solid #e5e7eb;color:#111827;font-size:14px;">${value}</td>
-          </tr>
-        `,
-          )
-          .join("")}
-        <tr>
-          <td style="padding:12px 16px;background:#f9fafb;color:#6b7280;font-size:13px;font-weight:600;vertical-align:top;">Message</td>
-          <td style="padding:12px 16px;background:#ffffff;color:#374151;font-size:14px;line-height:1.6;white-space:pre-wrap;">${message}</td>
-        </tr>
-      </table>
-      ${primaryButton("Reply to " + senderName, `mailto:${senderEmail}?subject=Re: ${encodeURIComponent(subject)}`)}
-    `,
-  });
+}) {
+  const html = baseTemplate(`
+    <h2 style="margin:0 0 16px;color:#f1f5f9;font-size:20px;">📬 New Contact Message</h2>
+    <table width="100%" cellpadding="0" cellspacing="0"
+      style="border-collapse:collapse;">
+      <tr>
+        <td style="padding:8px 0;color:#64748b;font-size:13px;width:90px;vertical-align:top;">
+          From:
+        </td>
+        <td style="padding:8px 0;color:#f1f5f9;font-size:14px;font-weight:600;">
+          ${senderName}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#64748b;font-size:13px;vertical-align:top;">
+          Email:
+        </td>
+        <td style="padding:8px 0;">
+          <a href="mailto:${senderEmail}"
+            style="color:#3b82f6;font-size:14px;text-decoration:none;">
+            ${senderEmail}
+          </a>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#64748b;font-size:13px;vertical-align:top;">
+          Subject:
+        </td>
+        <td style="padding:8px 0;color:#f1f5f9;font-size:14px;">
+          ${subject || "(No subject)"}
+        </td>
+      </tr>
+      <tr>
+        <td colspan="2" style="padding-top:16px;">
+          <div style="background:#0f172a;border-radius:10px;padding:16px;
+            border-left:3px solid #3b82f6;">
+            <p style="margin:0;color:#94a3b8;font-size:14px;line-height:1.7;
+              white-space:pre-wrap;">${message}</p>
+          </div>
+        </td>
+      </tr>
+    </table>
+    ${ctaButton(
+      `${process.env.CLIENT_URL || "http://localhost:5173"}/admin/feedback`,
+      "View in Admin Dashboard",
+    )}
+  `);
 
   return sendEmail({
-    to: adminEmail,
-    subject: `📬 New message from ${senderName}: ${subject}`,
+    to: adminEmail || process.env.EMAIL_USER,
+    subject: `📬 New message from ${senderName} — Research Portfolio`,
     html,
   });
-};
+}
 
-// ─── 6. Contact Form — Sender Confirmation ────────────────────────────────────
-const sendContactConfirmationEmail = async ({ to, name, subject }) => {
-  const html = emailShell({
-    title: "We received your message",
-    previewText: "Your message has been received. We'll get back to you soon.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">Message received ✅</h2>
-      <p style="margin:0 0 16px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Hi <strong>${name}</strong>, thank you for reaching out. We've received your message about:
+// ─────────────────────────────────────────────
+// TEMPLATE 5: Contact Confirmation (to sender)
+// Called by feedbackController.submitFeedback
+// ─────────────────────────────────────────────
+/**
+ * @param {object} options
+ * @param {string} options.to
+ * @param {string} options.name
+ * @param {string} options.subject
+ */
+export async function sendContactConfirmationEmail({ to, name, subject }) {
+  const html = baseTemplate(`
+    <h2 style="margin:0 0 8px;color:#f1f5f9;font-size:22px;">
+      Thanks for reaching out, ${name}! ✉️
+    </h2>
+    <p style="color:#94a3b8;margin:0 0 8px;line-height:1.6;">
+      We've received your message about
+      <strong style="color:#f1f5f9;">"${subject}"</strong>
+      and will get back to you as soon as possible.
+    </p>
+    <p style="color:#64748b;font-size:13px;margin:0;">
+      Typical response time: <strong style="color:#10b981;">1–2 business days</strong>.
+    </p>
+    <div style="margin-top:24px;padding:16px;background:#0f172a;border-radius:10px;
+      border-left:3px solid #10b981;">
+      <p style="margin:0;color:#64748b;font-size:13px;line-height:1.6;">
+        While you wait, feel free to explore our research publications and projects.
       </p>
-      <div style="background:#f9fafb;border-left:4px solid #1d4ed8;padding:14px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;">
-        <p style="margin:0;color:#374151;font-size:14px;font-style:italic;">"${subject}"</p>
-      </div>
-      ${infoBox("We typically respond within <strong>1–2 business days</strong>.")}
-      ${primaryButton("Visit Portfolio", process.env.CLIENT_URL)}
-    `,
-  });
+    </div>
+    ${ctaButton(process.env.CLIENT_URL || "http://localhost:5173", "Visit Research Portfolio")}
+  `);
 
   return sendEmail({
     to,
     subject: "We received your message — Research Portfolio",
     html,
   });
-};
+}
 
-// ─── 7. Account Deactivation Notice ──────────────────────────────────────────
-const sendAccountDeactivatedEmail = async ({ to, name, reason = "" }) => {
-  const html = emailShell({
-    title: "Your account has been deactivated",
-    previewText: "Important notice about your Research Portfolio account.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">Account deactivated</h2>
-      <p style="margin:0 0 16px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Hi <strong>${name}</strong>, your Research Portfolio account has been deactivated.
-        ${reason ? `<br/><br/>Reason: <em>${reason}</em>` : ""}
-      </p>
-      ${warningBox("If you believe this is a mistake, please contact support.")}
-      ${primaryButton("Contact Support", `mailto:${process.env.SMTP_USER}`)}
-    `,
-  });
-
-  return sendEmail({
-    to,
-    subject: "Your account has been deactivated — Research Portfolio",
-    html,
-  });
-};
-
-// ─── 8. New Login Alert (optional) ───────────────────────────────────────────
-const sendLoginAlertEmail = async ({ to, name, ip, device, time }) => {
-  const html = emailShell({
-    title: "New login to your account",
-    previewText: "A new login was detected on your Research Portfolio account.",
-    bodyHtml: `
-      <h2 style="margin:0 0 8px;color:#111827;font-size:22px;font-weight:700;">New login detected 🔐</h2>
-      <p style="margin:0 0 20px;color:#6b7280;font-size:15px;line-height:1.6;">
-        Hi <strong>${name}</strong>, we noticed a new login to your account.
-      </p>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:0 0 20px;">
-        ${[
-          ["Time", new Date(time).toLocaleString()],
-          ["IP Address", ip || "Unknown"],
-          ["Device", device || "Unknown"],
-        ]
-          .map(
-            ([label, value]) => `
-          <tr>
-            <td style="padding:10px 16px;background:#f9fafb;border-bottom:1px solid #e5e7eb;width:120px;color:#6b7280;font-size:13px;font-weight:600;">${label}</td>
-            <td style="padding:10px 16px;background:#ffffff;border-bottom:1px solid #e5e7eb;color:#111827;font-size:14px;">${value}</td>
-          </tr>
-        `,
-          )
-          .join("")}
-      </table>
-      ${warningBox("If this wasn't you, reset your password immediately.")}
-      ${primaryButton("Secure My Account", `${process.env.CLIENT_URL}/auth/forgot-password`)}
-    `,
-  });
-
-  return sendEmail({
-    to,
-    subject: "New login to your Research Portfolio account",
-    html,
-  });
-};
-
-// ─── Verify SMTP connection (call on server startup) ─────────────────────────
-const verifyEmailConnection = async () => {
-  try {
-    const transport = getTransporter();
-    await transport.verify();
-    console.log("✅ SMTP connection verified — email service ready.");
-    return true;
-  } catch (err) {
-    console.warn(`⚠️  SMTP connection failed: ${err.message}`);
-    console.warn("   Emails will not be sent. Check SMTP_* env variables.");
-    return false;
-  }
-};
-
-module.exports = {
-  sendEmail,
-  sendVerificationEmail,
-  sendPasswordResetEmail,
-  sendPasswordChangedEmail,
-  sendWelcomeEmail,
-  sendContactNotificationEmail,
-  sendContactConfirmationEmail,
-  sendAccountDeactivatedEmail,
-  sendLoginAlertEmail,
-  verifyEmailConnection,
-};
+export default sendEmail;

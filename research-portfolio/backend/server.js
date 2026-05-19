@@ -1,242 +1,200 @@
-const express = require("express");
-const cors = require("cors");
-const helmet = require("helmet");
-const morgan = require("morgan");
-const compression = require("compression");
-const cookieParser = require("cookie-parser");
-const rateLimit = require("express-rate-limit");
-const path = require("path");
-require("dotenv").config();
+/* eslint-disable no-undef */
+// ─────────────────────────────────────────────────────────────────────────────
+// backend/server.js
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Internal imports ─────────────────────────────────────────────────────────
-const { checkSupabaseConnection } = require("./config/supabaseClient");
-const { verifyEmailConnection } = require("./utils/email");
-const errorMiddleware = require("./middleware/errorMiddleware");
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 
-// ─── Route imports ─────────────────────────────────────────────────────────────
-const authRoutes = require("./routes/authRoutes");
-const userRoutes = require("./routes/userRoutes");
-const publicationRoutes = require("./routes/publicationsRoutes");
-const projectRoutes = require("./routes/projectsRoutes");
-const achievementRoutes = require("./routes/achievementsRoutes");
-const teamRoutes = require("./routes/teamRoutes");
-const blogRoutes = require("./routes/blogsRoutes");
-const contactRoutes = require("./routes/contactRoutes");
-const uploadRoutes = require("./routes/uploadRoutes");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, ".env") });
 
-// ─── App init ─────────────────────────────────────────────────────────────────
+import http from "http";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
+import { Server } from "socket.io";
+
+import { checkSupabaseConnection } from "./config/supabaseClient.js";
+import { socketHandler } from "./socket/socketHandler.js";
+
+// ─────────────────────────────────────────────
+// ROUTE IMPORTS
+// ─────────────────────────────────────────────
+import authRoutes from "./routes/authRoutes.js";
+import feedbackRoutes from "./routes/feedbackRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
+import projectRoutes from "./routes/projectsRoutes.js";
+import achievementRoutes from "./routes/achievementsRoutes.js";
+import blogRoutes from "./routes/blogsRoutes.js";
+import teamRoutes from "./routes/teamRoutes.js";
+import chatRoutes from "./routes/chatRoutes.js";
+// import publicationRoutes from "./routes/publicationsRoutes.js";
+
+// ─────────────────────────────────────────────
+// APP + HTTP SERVER
+// ─────────────────────────────────────────────
 const app = express();
+const server = http.createServer(app); // ← wrap Express in HTTP server
+const PORT = process.env.PORT || 5000;
 
-// ─── Trust proxy (needed for rate limiting behind Render/Nginx/Vercel) ────────
-app.set("trust proxy", 1);
+// ─────────────────────────────────────────────
+// SOCKET.IO
+// ─────────────────────────────────────────────
+const io = new Server(server, {
+  cors: {
+    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+});
 
-// ─── Security headers ─────────────────────────────────────────────────────────
-app.use(
-  helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", "data:", "blob:", "https:"],
-        connectSrc: ["'self'", process.env.SUPABASE_URL],
-      },
-    },
-  }),
-);
+socketHandler(io); // register all socket events
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.CLIENT_URL || "http://localhost:5173",
-  "http://localhost:3000",
-  "http://localhost:5173",
-];
+// Make io available to REST controllers if ever needed
+app.set("io", io);
+
+// ─────────────────────────────────────────────
+// SECURITY MIDDLEWARE
+// ─────────────────────────────────────────────
+app.use(helmet());
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (Postman, server-to-server)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error(`CORS: Origin ${origin} not allowed.`));
-    },
+    origin: process.env.CLIENT_URL || "http://localhost:5173",
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "x-access-token"],
-    exposedHeaders: ["X-Total-Count", "X-Page", "X-Total-Pages"],
   }),
 );
 
-// ─── Body parsing + cookies ───────────────────────────────────────────────────
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-app.use(cookieParser());
-
-// ─── Compression ──────────────────────────────────────────────────────────────
-app.use(compression());
-
-// ─── HTTP request logger ──────────────────────────────────────────────────────
-if (process.env.NODE_ENV === "development") {
-  app.use(morgan("dev"));
-} else {
-  // Compact production format
-  app.use(
-    morgan(":method :url :status :res[content-length] - :response-time ms", {
-      skip: (req) => req.url === "/api/health",
-    }),
-  );
-}
-
-// ─── Static file serving (uploaded PDFs, images) ─────────────────────────────
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-// ─── Global rate limiter ──────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300,
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
     success: false,
     message: "Too many requests. Please try again later.",
   },
-  skip: (req) => req.url === "/api/health",
 });
-app.use("/api", globalLimiter);
+app.use(globalLimiter);
 
-// ─── Stricter limiter for contact form ────────────────────────────────────────
-const contactLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5,
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     success: false,
-    message: "Too many contact form submissions. Try again in 1 hour.",
+    message: "Too many auth attempts. Please try again later.",
   },
 });
 
-// ─── API routes ───────────────────────────────────────────────────────────────
-app.use("/api/auth", authRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/publications", publicationRoutes);
-app.use("/api/projects", projectRoutes);
-app.use("/api/achievements", achievementRoutes);
-app.use("/api/team", teamRoutes);
-app.use("/api/blog", blogRoutes);
-app.use("/api/contact", contactLimiter, contactRoutes);
-app.use("/api/upload", uploadRoutes);
+// ─────────────────────────────────────────────
+// BODY + COOKIE PARSERS
+// ─────────────────────────────────────────────
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(cookieParser());
 
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    status: "ok",
-    environment: process.env.NODE_ENV,
-    timestamp: new Date().toISOString(),
-    uptime: `${Math.floor(process.uptime())}s`,
-    version: process.env.npm_package_version || "1.0.0",
+// ─────────────────────────────────────────────
+// REQUEST LOGGER (dev only)
+// ─────────────────────────────────────────────
+if (process.env.NODE_ENV === "development") {
+  app.use((req, _res, next) => {
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`,
+    );
+    next();
   });
-});
+}
 
-// ─── API info ─────────────────────────────────────────────────────────────────
-app.get("/api", (req, res) => {
+// ─────────────────────────────────────────────
+// HEALTH CHECK
+// ─────────────────────────────────────────────
+app.get("/api/health", (_req, res) => {
   res.json({
     success: true,
-    message: "Research Portfolio API",
-    version: "1.0.0",
-    endpoints: {
-      auth: "/api/auth",
+    message: "Research Portfolio API is running ✅",
+    env: process.env.NODE_ENV,
+    timestamp: new Date().toISOString(),
+    socket: "Socket.IO active ✅",
+    routes: {
+      auth: "POST /api/auth/signup | login | logout | refresh | forgot-password | reset-password",
+      feedback:
+        "POST /api/feedback | GET /api/feedback/admin | DELETE /api/feedback/admin/:id",
       users: "/api/users",
-      publications: "/api/publications",
       projects: "/api/projects",
       achievements: "/api/achievements",
+      blogs: "/api/blogs",
       team: "/api/team",
-      blog: "/api/blog",
-      contact: "/api/contact",
-      upload: "/api/upload",
-      health: "/api/health",
+      chat: "/api/chat",
     },
   });
 });
 
-// ─── 404 handler (catch-all for unknown routes) ────────────────────────────────
-app.use("*", (req, res) => {
-  res.status(404).json({
+// ─────────────────────────────────────────────
+// MOUNTED ROUTES
+// ─────────────────────────────────────────────
+app.use("/api/auth", authLimiter, authRoutes);
+app.use("/api/feedback", feedbackRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/projects", projectRoutes);
+app.use("/api/achievements", achievementRoutes);
+app.use("/api/blogs", blogRoutes);
+app.use("/api/team", teamRoutes);
+app.use("/api/chat", chatRoutes);
+// app.use("/api/publications", publicationRoutes);
+
+// ─────────────────────────────────────────────
+// 404 HANDLER
+// ─────────────────────────────────────────────
+app.use((_req, res) => {
+  res.status(404).json({ success: false, message: "Route not found." });
+});
+
+// ─────────────────────────────────────────────
+// GLOBAL ERROR HANDLER
+// ─────────────────────────────────────────────
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  console.error("[Server Error]", err.stack || err.message);
+  res.status(err.status || 500).json({
     success: false,
-    message: `Route ${req.method} ${req.originalUrl} not found.`,
+    message:
+      process.env.NODE_ENV === "production"
+        ? "Internal server error."
+        : err.message,
   });
 });
 
-// ─── Global error handler ─────────────────────────────────────────────────────
-app.use(errorMiddleware);
+// ─────────────────────────────────────────────
+// START SERVER  ← server.listen, NOT app.listen
+// ─────────────────────────────────────────────
+async function startServer() {
+  try {
+    await checkSupabaseConnection();
 
-// ─── Startup sequence ─────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT, 10) || 5000;
-
-const startServer = async () => {
-  // 1. Check Supabase connectivity
-  const supabaseOk = await checkSupabaseConnection();
-  if (!supabaseOk) {
-    console.error(
-      "❌ Cannot connect to Supabase. Check SUPABASE_URL and keys in .env",
-    );
+    server.listen(PORT, () => {
+      console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log(`🚀  Server running  → http://localhost:${PORT}`);
+      console.log(`🌍  Environment     → ${process.env.NODE_ENV}`);
+      console.log(`🔗  Frontend URL    → ${process.env.CLIENT_URL}`);
+      console.log(`📋  Health check    → http://localhost:${PORT}/api/health`);
+      console.log(`🔌  Socket.IO       → active`);
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    });
+  } catch (err) {
+    console.error("[Startup] ❌ Failed to start server:", err.message);
     process.exit(1);
   }
-
-  // 2. Verify SMTP (non-fatal — server starts even if email fails)
-  await verifyEmailConnection();
-
-  // 3. Start listening
-  const server = app.listen(PORT, () => {
-    console.log("");
-    console.log("┌────────────────────────────────────────────┐");
-    console.log("│      🎓 Research Portfolio API              │");
-    console.log("├────────────────────────────────────────────┤");
-    console.log(`│  Port        : ${PORT}                          │`);
-    console.log(
-      `│  Environment : ${(process.env.NODE_ENV || "development").padEnd(29)}│`,
-    );
-    console.log(
-      `│  Client URL  : ${(process.env.CLIENT_URL || "http://localhost:5173").padEnd(29)}│`,
-    );
-    console.log(`│  Health      : http://localhost:${PORT}/api/health  │`);
-    console.log("└────────────────────────────────────────────┘");
-    console.log("");
-  });
-
-  // ─── Graceful shutdown ─────────────────────────────────────────────────────
-  const gracefulShutdown = (signal) => {
-    console.log(`\n📴 ${signal} received. Shutting down gracefully...`);
-    server.close(() => {
-      console.log("✅ HTTP server closed.");
-      process.exit(0);
-    });
-
-    // Force exit after 10 seconds
-    setTimeout(() => {
-      console.error("⚠️  Forced exit after 10s timeout.");
-      process.exit(1);
-    }, 10_000);
-  };
-
-  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-
-  // ─── Unhandled errors ──────────────────────────────────────────────────────
-  process.on("unhandledRejection", (reason, promise) => {
-    console.error("🔴 Unhandled Rejection at:", promise, "reason:", reason);
-    if (process.env.NODE_ENV === "production") {
-      gracefulShutdown("unhandledRejection");
-    }
-  });
-
-  process.on("uncaughtException", (err) => {
-    console.error("🔴 Uncaught Exception:", err.message);
-    gracefulShutdown("uncaughtException");
-  });
-
-  return server;
-};
+}
 
 startServer();
-
-module.exports = app;

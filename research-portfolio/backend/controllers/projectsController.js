@@ -1,19 +1,47 @@
-const { validationResult } = require("express-validator");
-const {
-  supabase,
+/* eslint-disable no-undef */
+// ─────────────────────────────────────────────────────────────────────────────
+// backend/controllers/projectsController.js
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { validationResult } from "express-validator";
+import {
   supabaseAdmin,
   TABLES,
   STORAGE_BUCKETS,
   uploadFile,
   deleteFile,
   getSignedUrl,
-} = require("../config/supabaseClient");
+} from "../config/supabaseClient.js";
 
-// ─── Helper: format validation errors ────────────────────────────────────────
+// ─────────────────────────────────────────────
+// SCHEMA COLUMNS
+// ─────────────────────────────────────────────
+// id           uuid        NOT NULL  PK
+// title        text        NOT NULL
+// description  text        nullable
+// category     text        nullable
+// tags         text[]      nullable
+// files        text[]      nullable  (array of file URLs)
+// owner_id     uuid        nullable  FK → users.id
+// visibility   text        nullable  (public / private)
+// image        text        nullable
+// github_url   text        nullable
+// demo_url     text        nullable
+// stars        int         nullable
+// forks        int         nullable
+// year         text        nullable
+// status       text        nullable  (Completed / Ongoing)
+// featured     bool        nullable
+// created_at   timestamptz nullable
+// updated_at   timestamptz nullable
+// ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
 const formatErrors = (errors) =>
   errors.array().map((e) => ({ field: e.path, message: e.msg }));
 
-// ─── Helper: build pagination meta ───────────────────────────────────────────
 const buildPagination = (page, limit, total) => ({
   total,
   page,
@@ -23,94 +51,102 @@ const buildPagination = (page, limit, total) => ({
   hasPrevPage: page > 1,
 });
 
-// ─── Helper: parse comma-separated query params ───────────────────────────────
-const parseArrayParam = (param) => {
-  if (!param) return null;
-  return param
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-};
-
-// ─── Helper: strip undefined keys from object ─────────────────────────────────
 const cleanObject = (obj) =>
   Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 
+const parseTags = (tags) => {
+  if (!tags) return [];
+  if (Array.isArray(tags)) return tags.map((t) => t.trim()).filter(Boolean);
+  try {
+    const parsed = JSON.parse(tags);
+    return Array.isArray(parsed)
+      ? parsed.map((t) => t.trim()).filter(Boolean)
+      : [];
+  } catch {
+    return tags
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+};
+
+// ─────────────────────────────────────────────
+// FILE UPLOAD HELPERS
+// ─────────────────────────────────────────────
+const handleFileUpload = async (file, folder, bucket) => {
+  const safeName = file.originalname
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9._-]/g, "");
+  const filePath = `${folder}/${Date.now()}_${safeName}`;
+  return await uploadFile(bucket, filePath, file.buffer, file.mimetype);
+};
+
+const handleFileDeletion = async (url, bucket) => {
+  if (!url || url.startsWith("http")) return;
+  await deleteFile(bucket, url).catch(() => {});
+};
+
 // =============================================================================
-// @desc    Get all projects (public) with search, filter, pagination
+// @desc    Get all projects — search, filter, paginate
 // @route   GET /api/projects
 // @access  Public
 // =============================================================================
-exports.getProjects = async (req, res) => {
+export const getAllProjects = async (req, res) => {
   try {
     const {
       page = 1,
-      limit = 9,
+      limit = 12,
       search,
       category,
       status,
-      tech,
+      year,
+      tag,
       featured,
+      visibility = "public",
       sort = "created_at",
       order = "desc",
-      visibility = "public",
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10)));
     const offset = (pageNum - 1) * limitNum;
 
-    // Allowed sort columns to prevent injection
-    const allowedSorts = ["created_at", "title", "start_date", "views"];
+    const allowedSorts = [
+      "created_at",
+      "title",
+      "year",
+      "stars",
+      "forks",
+      "status",
+    ];
     const sortCol = allowedSorts.includes(sort) ? sort : "created_at";
     const ascending = order === "asc";
 
-    // ── Base query ──
     let query = supabaseAdmin
       .from(TABLES.PROJECTS)
       .select(
-        `id, title, short_description, description, category, tech_stack,
-         status, image_url, github_url, demo_url, paper_url,
-         featured, views, start_date, end_date, created_at, owner_id,
-         collaborators:team_members(id, name, role, photo_url)`,
+        `id, title, description, category, tags, image,
+         github_url, demo_url, stars, forks, year,
+         status, featured, visibility, created_at`,
         { count: "exact" },
       )
-      .eq("visibility", visibility)
-      .order(sortCol, { ascending })
+      .order(sortCol, { ascending, nullsFirst: false })
       .range(offset, offset + limitNum - 1);
 
-    // ── Filters ──
-    if (category) {
-      const cats = parseArrayParam(category);
-      if (cats?.length) query = query.in("category", cats);
-    }
-
-    if (status) {
-      const statuses = parseArrayParam(status);
-      if (statuses?.length) query = query.in("status", statuses);
-    }
-
+    // Public route only shows public projects
+    if (visibility) query = query.eq("visibility", visibility);
+    if (search?.trim())
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+    if (category) query = query.eq("category", category);
+    if (status) query = query.eq("status", status);
+    if (year) query = query.eq("year", year);
     if (featured === "true") query = query.eq("featured", true);
-
-    // Tech stack filter (checks if array contains value)
-    if (tech) {
-      const techList = parseArrayParam(tech);
-      if (techList?.length) {
-        query = query.overlaps("tech_stack", techList);
-      }
-    }
-
-    // Full-text search on title + description
-    if (search) {
-      query = query.or(
-        `title.ilike.%${search}%,short_description.ilike.%${search}%,description.ilike.%${search}%`,
-      );
-    }
+    if (tag?.trim()) query = query.contains("tags", [tag.trim()]);
 
     const { data, error, count } = await query;
 
     if (error) {
-      console.error("getProjects error:", error.message);
+      console.error("[Projects] getAllProjects error:", error.message);
       return res
         .status(500)
         .json({ success: false, message: "Failed to fetch projects." });
@@ -118,11 +154,11 @@ exports.getProjects = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data,
+      data: data ?? [],
       pagination: buildPagination(pageNum, limitNum, count ?? 0),
     });
   } catch (err) {
-    console.error("getProjects exception:", err.message);
+    console.error("[Projects] getAllProjects exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
@@ -132,15 +168,13 @@ exports.getProjects = async (req, res) => {
 // @route   GET /api/projects/:id
 // @access  Public
 // =============================================================================
-exports.getProjectById = async (req, res) => {
+export const getProjectById = async (req, res) => {
   try {
     const { id } = req.params;
 
     const { data: project, error } = await supabaseAdmin
       .from(TABLES.PROJECTS)
-      .select(
-        `*, collaborators:team_members(id, name, role, photo_url, linkedin_url, github_url)`,
-      )
+      .select("*")
       .eq("id", id)
       .single();
 
@@ -150,601 +184,44 @@ exports.getProjectById = async (req, res) => {
         .json({ success: false, message: "Project not found." });
     }
 
-    // Increment view count (fire-and-forget — don't await)
-    supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .update({ views: (project.views || 0) + 1 })
-      .eq("id", id)
-      .then(() => {})
-      .catch(() => {});
-
-    // Generate signed URL for private files if needed
-    if (project.file_url && !project.file_url.startsWith("http")) {
-      try {
-        project.file_url = await getSignedUrl(
-          STORAGE_BUCKETS.PROJECT_FILES,
-          project.file_url,
-        );
-      } catch {
-        project.file_url = null;
-      }
+    // Generate signed URLs for private file paths
+    if (Array.isArray(project.files)) {
+      project.files = await Promise.all(
+        project.files.map(async (fileUrl) => {
+          if (fileUrl && !fileUrl.startsWith("http")) {
+            try {
+              return await getSignedUrl(
+                STORAGE_BUCKETS.PROJECT_FILES,
+                fileUrl,
+                3600,
+              );
+            } catch {
+              return null;
+            }
+          }
+          return fileUrl;
+        }),
+      );
+      project.files = project.files.filter(Boolean);
     }
 
     return res.status(200).json({ success: true, data: project });
   } catch (err) {
-    console.error("getProjectById exception:", err.message);
+    console.error("[Projects] getProjectById exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // =============================================================================
-// @desc    Get MY projects (authenticated user's own projects)
-// @route   GET /api/projects/my
-// @access  Private
-// =============================================================================
-exports.getMyProjects = async (req, res) => {
-  try {
-    const { page = 1, limit = 10, status, category } = req.query;
-
-    const pageNum = Math.max(1, parseInt(page, 10));
-    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10)));
-    const offset = (pageNum - 1) * limitNum;
-
-    let query = supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select("*", { count: "exact" })
-      .eq("owner_id", req.user.id)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limitNum - 1);
-
-    if (status) query = query.eq("status", status);
-    if (category) query = query.eq("category", category);
-
-    const { data, error, count } = await query;
-
-    if (error) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to fetch your projects." });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data,
-      pagination: buildPagination(pageNum, limitNum, count ?? 0),
-    });
-  } catch (err) {
-    console.error("getMyProjects exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Create a new project
-// @route   POST /api/projects
-// @access  Private
-// =============================================================================
-exports.createProject = async (req, res) => {
-  try {
-    // Validate
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res
-        .status(422)
-        .json({ success: false, errors: formatErrors(errors) });
-    }
-
-    const {
-      title,
-      description,
-      short_description,
-      category,
-      tech_stack,
-      github_url,
-      demo_url,
-      paper_url,
-      status = "ongoing",
-      visibility = "public",
-      featured = false,
-      start_date,
-      end_date,
-      collaborator_ids,
-    } = req.body;
-
-    // ── Handle image upload ──
-    let image_url = req.body.image_url || null;
-    if (req.file) {
-      const fileName = `projects/${req.user.id}/${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-      const { publicUrl, error: uploadError } = await uploadFile(
-        STORAGE_BUCKETS.PROJECT_FILES,
-        fileName,
-        req.file.buffer,
-        req.file.mimetype,
-      );
-      if (uploadError) {
-        return res
-          .status(500)
-          .json({ success: false, message: "Image upload failed." });
-      }
-      image_url = publicUrl;
-    }
-
-    // ── Parse tech_stack and collaborator_ids ──
-    const techArray = Array.isArray(tech_stack)
-      ? tech_stack
-      : tech_stack
-        ? tech_stack
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean)
-        : [];
-
-    const collabIds = Array.isArray(collaborator_ids)
-      ? collaborator_ids
-      : collaborator_ids
-        ? JSON.parse(collaborator_ids)
-        : [];
-
-    // ── Insert project ──
-    const { data: project, error } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .insert([
-        cleanObject({
-          title: title.trim(),
-          description: description?.trim(),
-          short_description: short_description?.trim(),
-          category,
-          tech_stack: techArray,
-          github_url: github_url?.trim() || null,
-          demo_url: demo_url?.trim() || null,
-          paper_url: paper_url?.trim() || null,
-          image_url,
-          status,
-          visibility,
-          featured: Boolean(featured),
-          start_date: start_date || null,
-          end_date: end_date || null,
-          owner_id: req.user.id,
-          views: 0,
-        }),
-      ])
-      .select()
-      .single();
-
-    if (error) {
-      console.error("createProject DB error:", error.message);
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to create project." });
-    }
-
-    // ── Link collaborators ──
-    if (collabIds.length > 0) {
-      const links = collabIds.map((team_member_id) => ({
-        project_id: project.id,
-        team_member_id,
-      }));
-      await supabaseAdmin.from("project_collaborators").insert(links);
-    }
-
-    return res.status(201).json({
-      success: true,
-      message: "Project created successfully.",
-      data: project,
-    });
-  } catch (err) {
-    console.error("createProject exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Update a project
-// @route   PUT /api/projects/:id
-// @access  Private (owner or admin)
-// =============================================================================
-exports.updateProject = async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res
-        .status(422)
-        .json({ success: false, errors: formatErrors(errors) });
-    }
-
-    const { id } = req.params;
-
-    // ── Verify ownership ──
-    const { data: existing, error: fetchError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select("id, owner_id, image_url")
-      .eq("id", id)
-      .single();
-
-    if (fetchError || !existing) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Project not found." });
-    }
-
-    const isOwner = existing.owner_id === req.user.id;
-    const isAdmin = ["admin", "superadmin"].includes(req.user.role);
-
-    if (!isOwner && !isAdmin) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message: "You can only update your own projects.",
-        });
-    }
-
-    const {
-      title,
-      description,
-      short_description,
-      category,
-      tech_stack,
-      github_url,
-      demo_url,
-      paper_url,
-      status,
-      visibility,
-      featured,
-      start_date,
-      end_date,
-      collaborator_ids,
-    } = req.body;
-
-    // ── Handle new image upload ──
-    let image_url = req.body.image_url;
-    if (req.file) {
-      // Delete old image if it's in Supabase Storage
-      if (existing.image_url && !existing.image_url.includes("http")) {
-        await deleteFile(
-          STORAGE_BUCKETS.PROJECT_FILES,
-          existing.image_url,
-        ).catch(() => {});
-      }
-      const fileName = `projects/${req.user.id}/${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-      const { publicUrl, error: uploadError } = await uploadFile(
-        STORAGE_BUCKETS.PROJECT_FILES,
-        fileName,
-        req.file.buffer,
-        req.file.mimetype,
-      );
-      if (uploadError) {
-        return res
-          .status(500)
-          .json({ success: false, message: "Image upload failed." });
-      }
-      image_url = publicUrl;
-    }
-
-    // ── Parse tech_stack ──
-    const techArray = tech_stack
-      ? Array.isArray(tech_stack)
-        ? tech_stack
-        : tech_stack
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean)
-      : undefined;
-
-    // ── Build update payload (only include defined fields) ──
-    const updates = cleanObject({
-      title: title?.trim(),
-      description: description?.trim(),
-      short_description: short_description?.trim(),
-      category,
-      tech_stack: techArray,
-      github_url: github_url?.trim() || null,
-      demo_url: demo_url?.trim() || null,
-      paper_url: paper_url?.trim() || null,
-      image_url,
-      status,
-      visibility,
-      featured: featured !== undefined ? Boolean(featured) : undefined,
-      start_date: start_date || null,
-      end_date: end_date || null,
-      updated_at: new Date().toISOString(),
-    });
-
-    const { data: updated, error: updateError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .update(updates)
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (updateError) {
-      console.error("updateProject DB error:", updateError.message);
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to update project." });
-    }
-
-    // ── Update collaborators if provided ──
-    if (collaborator_ids !== undefined) {
-      const collabIds = Array.isArray(collaborator_ids)
-        ? collaborator_ids
-        : JSON.parse(collaborator_ids || "[]");
-
-      // Remove existing links and re-insert
-      await supabaseAdmin
-        .from("project_collaborators")
-        .delete()
-        .eq("project_id", id);
-
-      if (collabIds.length > 0) {
-        const links = collabIds.map((team_member_id) => ({
-          project_id: id,
-          team_member_id,
-        }));
-        await supabaseAdmin.from("project_collaborators").insert(links);
-      }
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Project updated successfully.",
-      data: updated,
-    });
-  } catch (err) {
-    console.error("updateProject exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Delete a project
-// @route   DELETE /api/projects/:id
-// @access  Private (owner or admin)
-// =============================================================================
-exports.deleteProject = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { data: project, error: fetchError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select("id, owner_id, image_url, file_url")
-      .eq("id", id)
-      .single();
-
-    if (fetchError || !project) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Project not found." });
-    }
-
-    const isOwner = project.owner_id === req.user.id;
-    const isAdmin = ["admin", "superadmin"].includes(req.user.role);
-
-    if (!isOwner && !isAdmin) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message: "You can only delete your own projects.",
-        });
-    }
-
-    // ── Clean up storage files ──
-    const deletePromises = [];
-    if (project.image_url && !project.image_url.startsWith("http")) {
-      deletePromises.push(
-        deleteFile(STORAGE_BUCKETS.PROJECT_FILES, project.image_url),
-      );
-    }
-    if (project.file_url && !project.file_url.startsWith("http")) {
-      deletePromises.push(
-        deleteFile(STORAGE_BUCKETS.PROJECT_FILES, project.file_url),
-      );
-    }
-    await Promise.allSettled(deletePromises);
-
-    // ── Delete collaborator links ──
-    await supabaseAdmin
-      .from("project_collaborators")
-      .delete()
-      .eq("project_id", id);
-
-    // ── Delete the project row ──
-    const { error: deleteError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .delete()
-      .eq("id", id);
-
-    if (deleteError) {
-      console.error("deleteProject DB error:", deleteError.message);
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to delete project." });
-    }
-
-    return res
-      .status(200)
-      .json({ success: true, message: "Project deleted successfully." });
-  } catch (err) {
-    console.error("deleteProject exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Toggle featured status (admin only)
-// @route   PATCH /api/projects/:id/featured
-// @access  Private + Admin
-// =============================================================================
-exports.toggleFeatured = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { data: project, error: fetchError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select("id, featured")
-      .eq("id", id)
-      .single();
-
-    if (fetchError || !project) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Project not found." });
-    }
-
-    const { data: updated, error } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .update({
-        featured: !project.featured,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id, featured")
-      .single();
-
-    if (error) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to toggle featured." });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Project ${updated.featured ? "featured" : "unfeatured"} successfully.`,
-      data: updated,
-    });
-  } catch (err) {
-    console.error("toggleFeatured exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Toggle visibility (public / private)
-// @route   PATCH /api/projects/:id/visibility
-// @access  Private (owner or admin)
-// =============================================================================
-exports.toggleVisibility = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const { data: project, error: fetchError } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select("id, owner_id, visibility")
-      .eq("id", id)
-      .single();
-
-    if (fetchError || !project) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Project not found." });
-    }
-
-    const isOwner = project.owner_id === req.user.id;
-    const isAdmin = ["admin", "superadmin"].includes(req.user.role);
-    if (!isOwner && !isAdmin) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Permission denied." });
-    }
-
-    const newVisibility =
-      project.visibility === "public" ? "private" : "public";
-
-    const { data: updated, error } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .update({
-        visibility: newVisibility,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select("id, visibility")
-      .single();
-
-    if (error) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to toggle visibility." });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Project is now ${updated.visibility}.`,
-      data: updated,
-    });
-  } catch (err) {
-    console.error("toggleVisibility exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Get project statistics (admin dashboard)
-// @route   GET /api/projects/stats
-// @access  Private + Admin
-// =============================================================================
-exports.getProjectStats = async (req, res) => {
-  try {
-    const [totalRes, categoryRes, statusRes, featuredRes] = await Promise.all([
-      // Total count
-      supabaseAdmin
-        .from(TABLES.PROJECTS)
-        .select("id", { count: "exact", head: true }),
-
-      // Count by category
-      supabaseAdmin.from(TABLES.PROJECTS).select("category"),
-
-      // Count by status
-      supabaseAdmin.from(TABLES.PROJECTS).select("status"),
-
-      // Featured count
-      supabaseAdmin
-        .from(TABLES.PROJECTS)
-        .select("id", { count: "exact", head: true })
-        .eq("featured", true),
-    ]);
-
-    // Aggregate category counts
-    const categoryCounts = (categoryRes.data || []).reduce(
-      (acc, { category }) => {
-        acc[category] = (acc[category] || 0) + 1;
-        return acc;
-      },
-      {},
-    );
-
-    // Aggregate status counts
-    const statusCounts = (statusRes.data || []).reduce((acc, { status }) => {
-      acc[status] = (acc[status] || 0) + 1;
-      return acc;
-    }, {});
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        total: totalRes.count ?? 0,
-        featured: featuredRes.count ?? 0,
-        byCategory: categoryCounts,
-        byStatus: statusCounts,
-      },
-    });
-  } catch (err) {
-    console.error("getProjectStats exception:", err.message);
-    return res.status(500).json({ success: false, message: "Server error." });
-  }
-};
-
-// =============================================================================
-// @desc    Get distinct categories and tech stacks (for filter UI)
+// @desc    Get distinct meta values for filter UI
 // @route   GET /api/projects/meta
 // @access  Public
 // =============================================================================
-exports.getProjectMeta = async (req, res) => {
+export const getProjectMeta = async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from(TABLES.PROJECTS)
-      .select("category, tech_stack, status")
-      .eq("visibility", "public");
+      .select("category, status, year, tags, visibility");
 
     if (error) {
       return res
@@ -758,63 +235,449 @@ exports.getProjectMeta = async (req, res) => {
     const statuses = [
       ...new Set(data.map((p) => p.status).filter(Boolean)),
     ].sort();
-    const techStacks = [
-      ...new Set(data.flatMap((p) => p.tech_stack || [])),
-    ].sort();
+    const years = [...new Set(data.map((p) => p.year).filter(Boolean))].sort(
+      (a, b) => b - a,
+    );
+    const tags = [...new Set(data.flatMap((p) => p.tags || []))].sort();
 
     return res.status(200).json({
       success: true,
-      data: { categories, statuses, techStacks },
+      data: { categories, statuses, years, tags },
     });
   } catch (err) {
-    console.error("getProjectMeta exception:", err.message);
+    console.error("[Projects] getProjectMeta exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // =============================================================================
-// @desc    Get featured projects only (for homepage)
-// @route   GET /api/projects/featured
-// @access  Public
+// @desc    Admin — create a project
+// @route   POST /api/projects/admin
+// @access  Private + Admin
 // =============================================================================
-exports.getFeaturedProjects = async (req, res) => {
+export const createProject = async (req, res) => {
   try {
-    const { limit = 6 } = req.query;
-    const limitNum = Math.min(20, Math.max(1, parseInt(limit, 10)));
-
-    const { data, error } = await supabaseAdmin
-      .from(TABLES.PROJECTS)
-      .select(
-        `id, title, short_description, category, tech_stack,
-         image_url, github_url, demo_url, status, featured, created_at`,
-      )
-      .eq("featured", true)
-      .eq("visibility", "public")
-      .order("created_at", { ascending: false })
-      .limit(limitNum);
-
-    if (error) {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
       return res
-        .status(500)
-        .json({
-          success: false,
-          message: "Failed to fetch featured projects.",
-        });
+        .status(422)
+        .json({ success: false, errors: formatErrors(errors) });
     }
 
-    return res.status(200).json({ success: true, data });
+    const {
+      title,
+      description,
+      category,
+      tags,
+      visibility,
+      github_url,
+      demo_url,
+      stars,
+      forks,
+      year,
+      status,
+      featured,
+    } = req.body;
+
+    // ── Handle image upload ───────────────────────────────────────────────────
+    let image = req.body.image || null;
+    if (req.files?.image?.[0]) {
+      try {
+        image = await handleFileUpload(
+          req.files.image[0],
+          `projects/${req.user.id}`,
+          STORAGE_BUCKETS.PROJECT_FILES,
+        );
+      } catch (uploadErr) {
+        console.error("[Projects] Image upload error:", uploadErr.message);
+        return res
+          .status(500)
+          .json({ success: false, message: "Image upload failed." });
+      }
+    }
+
+    // ── Handle multiple file uploads ──────────────────────────────────────────
+    let fileUrls = [];
+    if (req.files?.files?.length) {
+      try {
+        fileUrls = await Promise.all(
+          req.files.files.map((f) =>
+            handleFileUpload(
+              f,
+              `projects/${req.user.id}/files`,
+              STORAGE_BUCKETS.PROJECT_FILES,
+            ),
+          ),
+        );
+      } catch (uploadErr) {
+        console.error("[Projects] File upload error:", uploadErr.message);
+        return res
+          .status(500)
+          .json({ success: false, message: "File upload failed." });
+      }
+    }
+
+    const tagsArr = parseTags(tags);
+    const featuredBool =
+      featured === true || featured === "true" || featured === "1";
+
+    const { data: project, error } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .insert([
+        cleanObject({
+          title: title.trim(),
+          description: description?.trim() || null,
+          category: category?.trim() || null,
+          tags: tagsArr,
+          files: fileUrls.length ? fileUrls : [],
+          owner_id: req.user.id,
+          visibility: visibility || "public",
+          image,
+          github_url: github_url?.trim() || null,
+          demo_url: demo_url?.trim() || null,
+          stars: stars ? parseInt(stars, 10) : null,
+          forks: forks ? parseInt(forks, 10) : null,
+          year: year ? String(year).trim() : null,
+          status: status || null,
+          featured: featuredBool,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }),
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[Projects] createProject DB error:", error.message);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to create project." });
+    }
+
+    console.log(`[Projects] Created: "${project.title}" by ${req.user.email}`);
+
+    return res.status(201).json({
+      success: true,
+      message: "Project created successfully.",
+      data: project,
+    });
   } catch (err) {
-    console.error("getFeaturedProjects exception:", err.message);
+    console.error("[Projects] createProject exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // =============================================================================
-// @desc    Upload project image separately
-// @route   POST /api/projects/:id/image
-// @access  Private (owner or admin)
+// @desc    Admin — update a project
+// @route   PUT /api/projects/admin/:id
+// @access  Private + Admin
 // =============================================================================
-exports.uploadProjectImage = async (req, res) => {
+export const updateProject = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res
+        .status(422)
+        .json({ success: false, errors: formatErrors(errors) });
+    }
+
+    const { id } = req.params;
+
+    const { data: existing, error: fetchError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .select("id, title, image, files")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !existing) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Project not found." });
+    }
+
+    const {
+      title,
+      description,
+      category,
+      tags,
+      visibility,
+      github_url,
+      demo_url,
+      stars,
+      forks,
+      year,
+      status,
+      featured,
+    } = req.body;
+
+    // ── Handle image replacement ──────────────────────────────────────────────
+    let image = req.body.image; // undefined = no change
+    if (req.files?.image?.[0]) {
+      await handleFileDeletion(existing.image, STORAGE_BUCKETS.PROJECT_FILES);
+      try {
+        image = await handleFileUpload(
+          req.files.image[0],
+          `projects/${req.user.id}`,
+          STORAGE_BUCKETS.PROJECT_FILES,
+        );
+      } catch (uploadErr) {
+        console.error("[Projects] Image upload error:", uploadErr.message);
+        return res
+          .status(500)
+          .json({ success: false, message: "Image upload failed." });
+      }
+    }
+
+    // ── Handle additional file uploads (appended to existing) ─────────────────
+    let files = undefined; // undefined = no change
+    if (req.files?.files?.length) {
+      try {
+        const newFileUrls = await Promise.all(
+          req.files.files.map((f) =>
+            handleFileUpload(
+              f,
+              `projects/${req.user.id}/files`,
+              STORAGE_BUCKETS.PROJECT_FILES,
+            ),
+          ),
+        );
+        // Append new files to existing ones
+        files = [...(existing.files || []), ...newFileUrls];
+      } catch (uploadErr) {
+        console.error("[Projects] File upload error:", uploadErr.message);
+        return res
+          .status(500)
+          .json({ success: false, message: "File upload failed." });
+      }
+    }
+
+    const tagsArr = tags !== undefined ? parseTags(tags) : undefined;
+    const featuredBool =
+      featured !== undefined
+        ? featured === true || featured === "true" || featured === "1"
+        : undefined;
+
+    const updates = cleanObject({
+      title: title?.trim(),
+      description: description?.trim() || null,
+      category: category?.trim() || null,
+      tags: tagsArr,
+      files,
+      visibility: visibility || undefined,
+      image,
+      github_url: github_url?.trim() || null,
+      demo_url: demo_url?.trim() || null,
+      stars: stars !== undefined ? parseInt(stars, 10) : undefined,
+      forks: forks !== undefined ? parseInt(forks, 10) : undefined,
+      year: year !== undefined ? String(year).trim() : undefined,
+      status: status || null,
+      featured: featuredBool,
+      updated_at: new Date().toISOString(),
+    });
+
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .update(updates)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error("[Projects] updateProject DB error:", updateError.message);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to update project." });
+    }
+
+    console.log(`[Projects] Updated: "${updated.title}" by ${req.user.email}`);
+
+    return res.status(200).json({
+      success: true,
+      message: "Project updated successfully.",
+      data: updated,
+    });
+  } catch (err) {
+    console.error("[Projects] updateProject exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — delete a single project
+// @route   DELETE /api/projects/admin/:id
+// @access  Private + Admin
+// =============================================================================
+export const deleteProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: project, error: fetchError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .select("id, title, image, files")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !project) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Project not found." });
+    }
+
+    // Delete image + all associated files
+    const deletionPromises = [
+      handleFileDeletion(project.image, STORAGE_BUCKETS.PROJECT_FILES),
+      ...(project.files || []).map((f) =>
+        handleFileDeletion(f, STORAGE_BUCKETS.PROJECT_FILES),
+      ),
+    ];
+    await Promise.allSettled(deletionPromises);
+
+    const { error: deleteError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .delete()
+      .eq("id", id);
+
+    if (deleteError) {
+      console.error("[Projects] deleteProject DB error:", deleteError.message);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to delete project." });
+    }
+
+    console.log(
+      `[Projects] Deleted: "${project.title}" (id: ${id}) by ${req.user.email}`,
+    );
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Project deleted successfully." });
+  } catch (err) {
+    console.error("[Projects] deleteProject exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — bulk delete projects
+// @route   DELETE /api/projects/admin/bulk
+// @access  Private + Admin
+// =============================================================================
+export const bulkDeleteProjects = async (req, res) => {
+  try {
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ids must be a non-empty array of UUIDs.",
+      });
+    }
+
+    if (ids.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot delete more than 50 projects at once.",
+      });
+    }
+
+    const { data: projects } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .select("id, image, files")
+      .in("id", ids);
+
+    const deletionPromises = (projects || []).flatMap((p) => [
+      handleFileDeletion(p.image, STORAGE_BUCKETS.PROJECT_FILES),
+      ...(p.files || []).map((f) =>
+        handleFileDeletion(f, STORAGE_BUCKETS.PROJECT_FILES),
+      ),
+    ]);
+    await Promise.allSettled(deletionPromises);
+
+    const { error, count } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .delete({ count: "exact" })
+      .in("id", ids);
+
+    if (error) {
+      console.error("[Projects] bulkDeleteProjects DB error:", error.message);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to delete projects." });
+    }
+
+    console.log(
+      `[Projects] Bulk deleted ${count} projects by ${req.user.email}`,
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `${count} project(s) deleted successfully.`,
+      deleted: count,
+    });
+  } catch (err) {
+    console.error("[Projects] bulkDeleteProjects exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — toggle featured flag
+// @route   PATCH /api/projects/admin/:id/featured
+// @access  Private + Admin
+// =============================================================================
+export const toggleFeatured = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: project, error: fetchError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .select("id, title, featured")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !project) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Project not found." });
+    }
+
+    const newFeatured = !project.featured;
+
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .update({ featured: newFeatured, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("id, title, featured")
+      .single();
+
+    if (updateError) {
+      console.error("[Projects] toggleFeatured DB error:", updateError.message);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to update featured status." });
+    }
+
+    console.log(
+      `[Projects] Featured toggled: "${updated.title}" → ${newFeatured} by ${req.user.email}`,
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Project ${newFeatured ? "marked as featured" : "removed from featured"}.`,
+      data: updated,
+    });
+  } catch (err) {
+    console.error("[Projects] toggleFeatured exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — upload or replace project image
+// @route   POST /api/projects/admin/:id/image
+// @access  Private + Admin
+// =============================================================================
+export const uploadProjectImage = async (req, res) => {
   try {
     if (!req.file) {
       return res
@@ -826,7 +689,7 @@ exports.uploadProjectImage = async (req, res) => {
 
     const { data: project, error: fetchError } = await supabaseAdmin
       .from(TABLES.PROJECTS)
-      .select("id, owner_id, image_url")
+      .select("id, image")
       .eq("id", id)
       .single();
 
@@ -836,30 +699,20 @@ exports.uploadProjectImage = async (req, res) => {
         .json({ success: false, message: "Project not found." });
     }
 
-    const isOwner = project.owner_id === req.user.id;
-    const isAdmin = ["admin", "superadmin"].includes(req.user.role);
-    if (!isOwner && !isAdmin) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Permission denied." });
-    }
+    await handleFileDeletion(project.image, STORAGE_BUCKETS.PROJECT_FILES);
 
-    // Delete old image
-    if (project.image_url && !project.image_url.startsWith("http")) {
-      await deleteFile(STORAGE_BUCKETS.PROJECT_FILES, project.image_url).catch(
-        () => {},
+    let image;
+    try {
+      image = await handleFileUpload(
+        req.file,
+        `projects/${req.user.id}`,
+        STORAGE_BUCKETS.PROJECT_FILES,
       );
-    }
-
-    const fileName = `projects/${req.user.id}/${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-    const { publicUrl, error: uploadError } = await uploadFile(
-      STORAGE_BUCKETS.PROJECT_FILES,
-      fileName,
-      req.file.buffer,
-      req.file.mimetype,
-    );
-
-    if (uploadError) {
+    } catch (uploadErr) {
+      console.error(
+        "[Projects] uploadProjectImage upload error:",
+        uploadErr.message,
+      );
       return res
         .status(500)
         .json({ success: false, message: "Image upload failed." });
@@ -867,33 +720,144 @@ exports.uploadProjectImage = async (req, res) => {
 
     await supabaseAdmin
       .from(TABLES.PROJECTS)
-      .update({ image_url: publicUrl, updated_at: new Date().toISOString() })
+      .update({ image, updated_at: new Date().toISOString() })
       .eq("id", id);
 
     return res.status(200).json({
       success: true,
       message: "Project image uploaded successfully.",
-      data: { image_url: publicUrl },
+      data: { image },
     });
   } catch (err) {
-    console.error("uploadProjectImage exception:", err.message);
+    console.error("[Projects] uploadProjectImage exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
 // =============================================================================
-// @desc    Admin — get ALL projects regardless of visibility
+// @desc    Admin — upload additional files to a project
+// @route   POST /api/projects/admin/:id/files
+// @access  Private + Admin
+// =============================================================================
+export const uploadProjectFiles = async (req, res) => {
+  try {
+    if (!req.files?.length) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No files provided." });
+    }
+
+    const { id } = req.params;
+
+    const { data: project, error: fetchError } = await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .select("id, files")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !project) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Project not found." });
+    }
+
+    let newFileUrls;
+    try {
+      newFileUrls = await Promise.all(
+        req.files.map((f) =>
+          handleFileUpload(
+            f,
+            `projects/${req.user.id}/files`,
+            STORAGE_BUCKETS.PROJECT_FILES,
+          ),
+        ),
+      );
+    } catch (uploadErr) {
+      console.error(
+        "[Projects] uploadProjectFiles upload error:",
+        uploadErr.message,
+      );
+      return res
+        .status(500)
+        .json({ success: false, message: "File upload failed." });
+    }
+
+    const updatedFiles = [...(project.files || []), ...newFileUrls];
+
+    await supabaseAdmin
+      .from(TABLES.PROJECTS)
+      .update({ files: updatedFiles, updated_at: new Date().toISOString() })
+      .eq("id", id);
+
+    return res.status(200).json({
+      success: true,
+      message: `${newFileUrls.length} file(s) uploaded successfully.`,
+      data: { files: updatedFiles },
+    });
+  } catch (err) {
+    console.error("[Projects] uploadProjectFiles exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — get project stats for dashboard
+// @route   GET /api/projects/admin/stats
+// @access  Private + Admin
+// =============================================================================
+export const getProjectStats = async (req, res) => {
+  try {
+    const [totalRes, categoryRes, statusRes, featuredRes] = await Promise.all([
+      supabaseAdmin
+        .from(TABLES.PROJECTS)
+        .select("id", { count: "exact", head: true }),
+      supabaseAdmin.from(TABLES.PROJECTS).select("category"),
+      supabaseAdmin.from(TABLES.PROJECTS).select("status"),
+      supabaseAdmin
+        .from(TABLES.PROJECTS)
+        .select("id", { count: "exact", head: true })
+        .eq("featured", true),
+    ]);
+
+    const byCategory = (categoryRes.data || []).reduce((acc, { category }) => {
+      if (category) acc[category] = (acc[category] || 0) + 1;
+      return acc;
+    }, {});
+
+    const byStatus = (statusRes.data || []).reduce((acc, { status }) => {
+      if (status) acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total: totalRes.count ?? 0,
+        featured: featuredRes.count ?? 0,
+        byCategory,
+        byStatus,
+      },
+    });
+  } catch (err) {
+    console.error("[Projects] getProjectStats exception:", err.message);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// =============================================================================
+// @desc    Admin — list all projects (manage page, all fields)
 // @route   GET /api/projects/admin/all
 // @access  Private + Admin
 // =============================================================================
-exports.adminGetAllProjects = async (req, res) => {
+export const adminGetAllProjects = async (req, res) => {
   try {
     const {
       page = 1,
-      limit = 15,
+      limit = 20,
       search,
       category,
       status,
+      year,
       visibility,
     } = req.query;
 
@@ -903,23 +867,21 @@ exports.adminGetAllProjects = async (req, res) => {
 
     let query = supabaseAdmin
       .from(TABLES.PROJECTS)
-      .select(
-        `id, title, category, status, visibility, featured,
-         views, created_at, updated_at, owner_id,
-         owner:users(id, name, email)`,
-        { count: "exact" },
-      )
+      .select("*", { count: "exact" })
       .order("created_at", { ascending: false })
       .range(offset, offset + limitNum - 1);
 
-    if (search) query = query.ilike("title", `%${search}%`);
+    if (search?.trim())
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
     if (category) query = query.eq("category", category);
     if (status) query = query.eq("status", status);
+    if (year) query = query.eq("year", year);
     if (visibility) query = query.eq("visibility", visibility);
 
     const { data, error, count } = await query;
 
     if (error) {
+      console.error("[Projects] adminGetAllProjects error:", error.message);
       return res
         .status(500)
         .json({ success: false, message: "Failed to fetch projects." });
@@ -927,11 +889,11 @@ exports.adminGetAllProjects = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data,
+      data: data ?? [],
       pagination: buildPagination(pageNum, limitNum, count ?? 0),
     });
   } catch (err) {
-    console.error("adminGetAllProjects exception:", err.message);
+    console.error("[Projects] adminGetAllProjects exception:", err.message);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
