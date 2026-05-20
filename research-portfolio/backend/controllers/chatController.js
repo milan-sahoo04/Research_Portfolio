@@ -78,12 +78,10 @@ export const sendMessage = async (req, res) => {
     }
 
     if (sender_id === receiver_id) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Cannot send a message to yourself.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Cannot send a message to yourself.",
+      });
     }
 
     // ── Attachment upload ─────────────────────────────────────────────────────
@@ -104,23 +102,19 @@ export const sendMessage = async (req, res) => {
     }
 
     if (message_type === "text" && !message?.trim()) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Message content is required for text messages.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Message content is required for text messages.",
+      });
     }
     if (
       (message_type === "image" || message_type === "file") &&
       !attachmentUrl
     ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "A file attachment is required for image/file messages.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "A file attachment is required for image/file messages.",
+      });
     }
 
     const room_id = buildRoomId(sender_id, receiver_id);
@@ -264,12 +258,10 @@ export const deleteMessage = async (req, res) => {
     }
 
     if (msg.sender_id !== userId && !isAdmin) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message: "Not authorised to delete this message.",
-        });
+      return res.status(403).json({
+        success: false,
+        message: "Not authorised to delete this message.",
+      });
     }
 
     if (
@@ -323,11 +315,16 @@ export const getChatRooms = async (req, res) => {
         .json({ success: false, message: "Failed to fetch chat rooms." });
     }
 
+    // Build room map
     const roomMap = new Map();
+    const partnerIds = new Set();
+
     for (const row of data ?? []) {
+      const partnerId =
+        row.sender_id === userId ? row.receiver_id : row.sender_id;
+      partnerIds.add(partnerId);
+
       if (!roomMap.has(row.room_id)) {
-        const partnerId =
-          row.sender_id === userId ? row.receiver_id : row.sender_id;
         roomMap.set(row.room_id, {
           room_id: row.room_id,
           partner_id: partnerId,
@@ -339,6 +336,25 @@ export const getChatRooms = async (req, res) => {
       }
       if (row.receiver_id === userId && !row.is_read) {
         roomMap.get(row.room_id).unread_count += 1;
+      }
+    }
+
+    // Fetch partner details (name, profile_pic, role) in one query
+    if (partnerIds.size > 0) {
+      const { data: partners } = await supabaseAdmin
+        .from(TABLES.USERS)
+        .select("id, name, email, role, profile_pic")
+        .in("id", [...partnerIds]);
+
+      // Attach partner info to each room
+      for (const room of roomMap.values()) {
+        const partner = (partners || []).find((p) => p.id === room.partner_id);
+        if (partner) {
+          room.partner_name = partner.name;
+          room.partner_email = partner.email;
+          room.partner_role = partner.role;
+          room.partner_profile_pic = partner.profile_pic;
+        }
       }
     }
 
@@ -354,7 +370,6 @@ export const getChatRooms = async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
-
 // =============================================================================
 // @desc    Get total unread message count for the logged-in user
 // @route   GET /api/chat/unread-count

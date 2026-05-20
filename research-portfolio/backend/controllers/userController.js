@@ -687,3 +687,30 @@ export const bulkDeleteUsers = async (req, res) => {
     return fail(res, "Server error.", 500);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. GET ADMINS FOR CHAT  (any authenticated user)
+// GET /api/users/admins
+// Returns only active, non-deleted admins — safe for regular users
+// ─────────────────────────────────────────────────────────────────────────────
+export const getAdminsForChat = async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, name, email, role, profile_pic")
+      .eq("role", "admin")
+      .eq("is_active", true)
+      .is("deleted_at", null)
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.error("[User] getAdminsForChat DB error:", error.message);
+      return fail(res, "Failed to fetch admins.", 500);
+    }
+
+    return ok(res, { data: data || [] });
+  } catch (err) {
+    console.error("[User] getAdminsForChat exception:", err.message);
+    return fail(res, "Server error.", 500);
+  }
+};

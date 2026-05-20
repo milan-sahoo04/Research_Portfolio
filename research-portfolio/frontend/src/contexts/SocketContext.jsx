@@ -1,67 +1,60 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+// src/contexts/SocketContext.jsx
+import { createContext, useContext, useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import { useAuth } from "./AuthContext";
 
 const SocketContext = createContext(null);
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
-
 export function SocketProvider({ children }) {
-  const { token, isAuthenticated } = useAuth();
-  const socketRef = useRef(null);
-  const [connected, setConnected] = useState(false);
+  const { user, isAuthenticated } = useAuth();
+
+  // ✅ FIX: useState instead of useRef so context consumers re-render
+  //    when the socket instance is created / destroyed.
+  const [socket, setSocket] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated || !token) {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-        setConnected(false);
-      }
-      return;
-    }
+    if (!isAuthenticated || !user?.id) return;
 
-    const socket = io(SOCKET_URL, {
-      auth: { token },
+    const SOCKET_URL =
+      import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
+
+    const s = io(SOCKET_URL, {
       transports: ["websocket"],
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
     });
 
-    socketRef.current = socket;
+    // ✅ Store instance in state — triggers re-render so consumers get
+    //    the live socket object instead of the stale null ref.
+    setSocket(s);
 
-    socket.on("connect", () => setConnected(true));
-    socket.on("disconnect", () => setConnected(false));
-    socket.on("online_users", (users) => setOnlineUsers(users));
+    s.on("connect", () => {
+      setConnected(true);
+      s.emit("register", user.id);
+    });
+
+    s.on("disconnect", () => setConnected(false));
+
+    s.on("online_users", (users) => setOnlineUsers(users));
 
     return () => {
-      socket.disconnect();
+      s.disconnect();
+      setConnected(false);
+      setSocket(null);
     };
-  }, [isAuthenticated, token]);
+  }, [isAuthenticated, user?.id]);
 
-  const emit = (event, data) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit(event, data);
-    }
-  };
-
-  const on = (event, callback) => {
-    socketRef.current?.on(event, callback);
-    return () => socketRef.current?.off(event, callback);
-  };
+  const isOnline = (userId) => onlineUsers.includes(userId);
 
   return (
     <SocketContext.Provider
-      value={{ socket: socketRef.current, connected, onlineUsers, emit, on }}
+      value={{ socket, onlineUsers, connected, isOnline }}
     >
       {children}
     </SocketContext.Provider>
   );
 }
 
-export function useSocket() {
-  const ctx = useContext(SocketContext);
-  if (!ctx) throw new Error("useSocket must be used within SocketProvider");
-  return ctx;
-}
+export const useSocket = () => useContext(SocketContext);

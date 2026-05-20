@@ -15,6 +15,7 @@ export const NAV_LINKS = [
   { label: "Achievements", path: "/achievements" },
   { label: "About", path: "/about" },
   { label: "Contact", path: "/contact" },
+  { label: "Feedback", path: "/feedback" },
 ];
 
 export const PROJECT_CATEGORIES = [

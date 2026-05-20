@@ -19,6 +19,7 @@ import {
   deleteProfilePic,
   getUserStats,
   bulkDeleteUsers,
+  getAdminsForChat,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { adminOnly, selfOrAdmin } from "../middleware/roleMiddleware.js";
@@ -139,6 +140,8 @@ router.post(
 
 // DELETE /api/users/me/profile-pic — remove own profile picture
 router.delete("/me/profile-pic", protect, deleteProfilePic);
+
+router.get("/admins", protect, getAdminsForChat);
 
 // ─────────────────────────────────────────────
 // ADMIN ROUTES  (protect + adminOnly on all)

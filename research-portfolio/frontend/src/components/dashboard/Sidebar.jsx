@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { Link, NavLink, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   LayoutDashboard,
@@ -12,16 +12,21 @@ import {
   Microscope,
   X,
   ChevronRight,
+  BookOpen, // ← add
+  Inbox, // ← add
 } from "lucide-react";
 import { useAuth } from "../../contexts/AuthContext";
 import { APP_NAME } from "../../utils/constants";
 
 const NAV_ITEMS = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/admin/dashboard" },
+  { icon: Users, label: "Users", path: "/admin/users" },
   { icon: FolderOpen, label: "Projects", path: "/admin/projects" },
   { icon: FileText, label: "Blogs", path: "/admin/blogs" },
   { icon: Trophy, label: "Achievements", path: "/admin/achievements" },
   { icon: Users, label: "Team", path: "/admin/team" },
+  { icon: BookOpen, label: "Publications", path: "/admin/publications" },
+  { icon: Inbox, label: "Feedback", path: "/admin/feedback" },
   { icon: MessageSquare, label: "Chat", path: "/admin/chat" },
   { icon: Settings, label: "Settings", path: "/admin/settings" },
 ];
@@ -42,14 +47,14 @@ function Sidebar({ open, onClose }) {
         className="flex items-center justify-between px-5 py-4 border-b"
         style={{ borderColor: "var(--border)" }}
       >
-        <div className="flex items-center gap-2.5">
+        <Link to="/" className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
             <Microscope size={16} className="text-white" />
           </div>
           <span className="font-display font-bold text-base gradient-text">
             {APP_NAME}
           </span>
-        </div>
+        </Link>
         {/* Close on mobile */}
         <button
           onClick={onClose}

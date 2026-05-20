@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import { loginApi } from "../../api/authApi";
+import { loginApi, getMeApi } from "../../api/authApi";
 
 export default function Login() {
   const { login, isAuthenticated, isAdmin } = useAuth();
@@ -35,14 +35,20 @@ export default function Login() {
   }, [searchParams]);
 
   // Handle Google OAuth success token from backend redirect
+  // Handle Google OAuth success token from backend redirect
   useEffect(() => {
     const token = searchParams.get("token");
     const provider = searchParams.get("provider");
     if (token && provider === "google") {
-      // Store token and fetch user from /me if needed
-      // For now, navigate to dashboard — AuthContext will hydrate from localStorage
       localStorage.setItem("token", token);
-      navigate("/", { replace: true });
+      // Fetch user profile then call login() properly
+      getMeApi()
+        .then((data) => {
+          if (data.success) {
+            login(data.user, token);
+          }
+        })
+        .finally(() => navigate("/", { replace: true }));
     }
   }, [searchParams, navigate]);
 

@@ -21,19 +21,21 @@ import {
   adminUnfeaturePublication,
 } from "../controllers/publicationController.js";
 
+import {
+  supabaseAdmin,
+  TABLES,
+  STORAGE_BUCKETS,
+  deleteFile,
+} from "../config/supabaseClient.js";
+
 import { protect, optionalProtect } from "../middleware/authMiddleware.js";
 import { requireVerified, adminOnly } from "../middleware/roleMiddleware.js";
 import { uploadPDFMiddleware } from "../middleware/uploadMiddleware.js";
-const router = express.Router();
 
-// ─────────────────────────────────────────────
-// MULTER ERROR WRAPPER
-// Returns clean JSON instead of crashing Express
-// ─────────────────────────────────────────────
+const router = express.Router();
 
 // =============================================================================
 // PUBLIC ROUTES  (no token required)
-// Guests and logged-in users can browse / view
 // =============================================================================
 
 // GET /api/publications/featured  ← BEFORE /:id to avoid route conflict
@@ -45,25 +47,8 @@ router.get("/search", searchPublications);
 // GET /api/publications/meta  ← BEFORE /:id
 router.get("/meta", getPublicationMeta);
 
-// GET /api/publications
-router.get("/", optionalProtect, getPublications);
-
-// GET /api/publications/:id
-// Returns public fields only — pdf_url is stripped, has_pdf flag added
-router.get("/:id", optionalProtect, getPublicationById);
-
 // =============================================================================
-// PROTECTED ROUTES — logged-in + verified users only
-// =============================================================================
-
-// GET /api/publications/:id/download
-// Generates a 60-min signed Supabase URL for the PDF
-// Flow: Guest ❌  |  Logged-in ✅  |  Admin ✅
-router.get("/:id/download", protect, requireVerified, downloadPublication);
-
-// =============================================================================
-// ADMIN ROUTES  /admin/*
-// All require: protect → requireVerified → adminOnly
+// ADMIN ROUTES  /admin/*  ← MUST be before /:id — "admin" would match /:id
 // =============================================================================
 
 // GET /api/publications/admin/stats
@@ -94,8 +79,6 @@ router.get(
 );
 
 // POST /api/publications/admin
-// Admin creates a publication — optional PDF via multipart/form-data
-// Field name for file: "pdf"
 router.post(
   "/admin",
   protect,
@@ -106,8 +89,6 @@ router.post(
 );
 
 // PUT /api/publications/admin/:id
-// Admin updates any publication — optional new PDF
-// Field name for file: "pdf"
 router.put(
   "/admin/:id",
   protect,
@@ -117,8 +98,78 @@ router.put(
   updatePublication,
 );
 
+// DELETE /api/publications/admin/bulk  ← MUST be before /admin/:id
+router.delete(
+  "/admin/bulk",
+  protect,
+  requireVerified,
+  adminOnly,
+  async (req, res) => {
+    try {
+      const { ids } = req.body;
+
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "ids must be a non-empty array of UUIDs.",
+        });
+      }
+
+      if (ids.length > 100) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot delete more than 100 publications at once.",
+        });
+      }
+
+      // Fetch pdf_urls so we can clean up storage
+      const { data: pubs } = await supabaseAdmin
+        .from(TABLES.PUBLICATIONS)
+        .select("id, pdf_url")
+        .in("id", ids);
+
+      // Delete PDFs from Supabase Storage (fire-and-forget per file)
+      await Promise.allSettled(
+        (pubs || [])
+          .filter((p) => p.pdf_url && !p.pdf_url.startsWith("http"))
+          .map((p) =>
+            deleteFile(STORAGE_BUCKETS.PUBLICATION_PDFS, p.pdf_url).catch(
+              () => {},
+            ),
+          ),
+      );
+
+      // Delete rows
+      const { error, count } = await supabaseAdmin
+        .from(TABLES.PUBLICATIONS)
+        .delete({ count: "exact" })
+        .in("id", ids);
+
+      if (error) {
+        console.error("[Publications] bulkDelete DB error:", error.message);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to delete publications.",
+        });
+      }
+
+      console.log(
+        `[Publications] Bulk deleted ${count} publications by admin: ${req.user.email}`,
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `${count} publication(s) deleted successfully.`,
+        deleted: count,
+      });
+    } catch (err) {
+      console.error("[Publications] bulkDelete exception:", err.message);
+      return res.status(500).json({ success: false, message: "Server error." });
+    }
+  },
+);
+
 // DELETE /api/publications/admin/:id
-// Admin force-deletes publication + removes PDF from Supabase Storage
 router.delete(
   "/admin/:id",
   protect,
@@ -144,5 +195,22 @@ router.patch(
   adminOnly,
   adminUnfeaturePublication,
 );
+
+// =============================================================================
+// PUBLIC ROUTES (continued) — /:id MUST come after all static/admin paths
+// =============================================================================
+
+// GET /api/publications
+router.get("/", optionalProtect, getPublications);
+
+// GET /api/publications/:id
+router.get("/:id", optionalProtect, getPublicationById);
+
+// =============================================================================
+// PROTECTED ROUTES — logged-in + verified users only
+// =============================================================================
+
+// GET /api/publications/:id/download
+router.get("/:id/download", protect, requireVerified, downloadPublication);
 
 export default router;

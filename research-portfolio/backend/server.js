@@ -33,13 +33,13 @@ import achievementRoutes from "./routes/achievementsRoutes.js";
 import blogRoutes from "./routes/blogsRoutes.js";
 import teamRoutes from "./routes/teamRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
-// import publicationRoutes from "./routes/publicationsRoutes.js";
+import publicationRoutes from "./routes/publicationRoutes.js";
 
 // ─────────────────────────────────────────────
 // APP + HTTP SERVER
 // ─────────────────────────────────────────────
 const app = express();
-const server = http.createServer(app); // ← wrap Express in HTTP server
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 
 // ─────────────────────────────────────────────
@@ -55,9 +55,7 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-socketHandler(io); // register all socket events
-
-// Make io available to REST controllers if ever needed
+socketHandler(io);
 app.set("io", io);
 
 // ─────────────────────────────────────────────
@@ -74,11 +72,34 @@ app.use(
   }),
 );
 
+// ─────────────────────────────────────────────
+// RATE LIMITERS
+// ─────────────────────────────────────────────
+
+// ✅ FIX: Global limiter — raised from 100 → 500 per 15 min.
+//    100 was far too low; a single admin page load fires 4+ requests,
+//    and dev hot-reloads compound this instantly.
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // generous for real users, blocks scrapers
   standardHeaders: true,
   legacyHeaders: false,
+  // ✅ v7 fix: use skip() instead of max:0 — skipped requests are never
+  //    counted or blocked, so hot-reload in dev never triggers 429s.
+  skip: (req) => {
+    // Skip entirely in development
+    if (process.env.NODE_ENV === "development") return true;
+
+    // In production: skip authenticated admin routes — they're already
+    // protected by protect + requireAdmin middleware.
+    return (
+      req.path.startsWith("/api/projects/admin") ||
+      req.path.startsWith("/api/blogs/admin") ||
+      req.path.startsWith("/api/team/admin") ||
+      req.path.startsWith("/api/achievements/admin") ||
+      req.path.startsWith("/api/users/admin")
+    );
+  },
   message: {
     success: false,
     message: "Too many requests. Please try again later.",
@@ -86,6 +107,7 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+// Auth limiter stays strict — brute-force protection
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -151,7 +173,7 @@ app.use("/api/achievements", achievementRoutes);
 app.use("/api/blogs", blogRoutes);
 app.use("/api/team", teamRoutes);
 app.use("/api/chat", chatRoutes);
-// app.use("/api/publications", publicationRoutes);
+app.use("/api/publications", publicationRoutes);
 
 // ─────────────────────────────────────────────
 // 404 HANDLER
@@ -176,7 +198,7 @@ app.use((err, _req, res, _next) => {
 });
 
 // ─────────────────────────────────────────────
-// START SERVER  ← server.listen, NOT app.listen
+// START
 // ─────────────────────────────────────────────
 async function startServer() {
   try {
