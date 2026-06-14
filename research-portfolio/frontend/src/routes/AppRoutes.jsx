@@ -12,6 +12,7 @@ import ProjectDetails from "../pages/public/ProjectDetails";
 import Blogs from "../pages/public/Blogs";
 import BlogDetails from "../pages/public/BlogDetails";
 import Achievements from "../pages/public/Achievements";
+import PublicationDetails from "../pages/public/PublicationDetails";
 import Team from "../pages/public/Team";
 import About from "../pages/public/About";
 import Contact from "../pages/public/Contact";
@@ -25,6 +26,7 @@ import Login from "../pages/auth/Login";
 import Signup from "../pages/auth/Signup";
 import ForgotPassword from "../pages/auth/ForgotPassword";
 import ResetPassword from "../pages/auth/ResetPassword";
+import VerifyEmail from "../pages/auth/VerifyEmail";
 
 /* ---- ADMIN ---- */
 import Dashboard from "../pages/admin/Dashboard";
@@ -53,6 +55,7 @@ function AppRoutes() {
         <Route path="/about" element={<About />} />
         <Route path="/contact" element={<Contact />} />
         <Route path="/publications" element={<Publications />} /> {/* ← add */}
+        <Route path="/publications/:id" element={<PublicationDetails />} />
         <Route path="/feedback" element={<Feedback />} /> {/* ← add */}
         <Route element={<ProtectedRoute />}>
           <Route path="/profile" element={<Profile />} />
@@ -64,6 +67,7 @@ function AppRoutes() {
       <Route path="/signup" element={<Signup />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
 
       {/* ADMIN */}
       <Route element={<ProtectedRoute adminOnly redirectTo="/" />}>

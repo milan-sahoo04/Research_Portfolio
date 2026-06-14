@@ -8,9 +8,9 @@ import {
   Loader2,
   ChevronDown,
   ArrowLeft,
+  MessageSquare,
   Shield,
 } from "lucide-react";
-import { AnimatePresence as AP } from "framer-motion";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import { useSocket } from "../../contexts/SocketContext";
@@ -44,10 +44,10 @@ export default function ChatWindow({ partner, onBack }) {
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
   const typingTimerRef = useRef(null);
-  const messagesContainerRef = useRef(null);
+  const containerRef = useRef(null);
 
-  // ── Fetch messages ─────────────────────────────────────
   const fetchMessages = useCallback(
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization
     async (pg = 1, prepend = false) => {
       if (!partner?.id) return;
       try {
@@ -69,6 +69,7 @@ export default function ChatWindow({ partner, onBack }) {
 
   useEffect(() => {
     if (!partner?.id) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setMessages([]);
     setPage(1);
@@ -77,30 +78,21 @@ export default function ChatWindow({ partner, onBack }) {
     inputRef.current?.focus();
   }, [partner?.id, fetchMessages]);
 
-  // ── Socket events ──────────────────────────────────────
-  // ── Socket events ──────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
-
     const onReceive = (msg) => {
-      // Only add to messages if this conversation is currently open
       if (!partner?.id || msg.sender_id !== partner.id) return;
-
       setMessages((prev) => {
-        // Avoid duplicates (in case both REST and socket deliver)
         if (prev.find((m) => m.id === msg.id)) return prev;
         return [...prev, msg];
       });
       markAsReadApi(partner.id).catch(() => {});
+      // eslint-disable-next-line react-hooks/immutability
       scrollToBottom();
     };
-
     const onSent = (msg) => {
       setMessages((prev) => {
-        // Avoid duplicates
         if (prev.find((m) => m.id === msg.id)) return prev;
-
-        // Replace optimistic message if present
         const idx = prev.findIndex(
           (m) => m._optimistic && m.receiver_id === msg.receiver_id,
         );
@@ -111,25 +103,22 @@ export default function ChatWindow({ partner, onBack }) {
         }
         return [...prev, msg];
       });
-      scrollToBottom(); // ← ADD: scroll when sent message is confirmed
+      scrollToBottom();
     };
-
     const onTypingStart = ({ sender_id }) => {
       if (sender_id === partner?.id) setIsTyping(true);
     };
     const onTypingStop = ({ sender_id }) => {
       if (sender_id === partner?.id) setIsTyping(false);
     };
-    const onRead = () => {
+    const onRead = () =>
       setMessages((prev) => prev.map((m) => ({ ...m, is_read: true })));
-    };
 
     socket.on("receive_message", onReceive);
     socket.on("message_sent", onSent);
     socket.on("typing_start", onTypingStart);
     socket.on("typing_stop", onTypingStop);
     socket.on("messages_read", onRead);
-
     return () => {
       socket.off("receive_message", onReceive);
       socket.off("message_sent", onSent);
@@ -138,33 +127,27 @@ export default function ChatWindow({ partner, onBack }) {
       socket.off("messages_read", onRead);
     };
   }, [socket, partner?.id]);
-  // ── Scroll helpers ─────────────────────────────────────
-  const scrollToBottom = (smooth = true) => {
+
+  const scrollToBottom = (smooth = true) =>
     bottomRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
-  };
 
   useEffect(() => {
     if (!loading) scrollToBottom(false);
   }, [loading]);
-
   useEffect(() => {
     scrollToBottom();
   }, [messages.length]);
 
   const handleScroll = () => {
-    const el = messagesContainerRef.current;
+    const el = containerRef.current;
     if (!el) return;
-    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setShowScrollBtn(fromBottom > 200);
-
-    // Load more on scroll to top
+    setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 200);
     if (el.scrollTop < 60 && hasMore && !loadingMore) {
       setLoadingMore(true);
       fetchMessages(page + 1, true);
     }
   };
 
-  // ── Typing indicator ───────────────────────────────────
   const handleTyping = (val) => {
     setText(val);
     if (!socket || !user?.id) return;
@@ -181,7 +164,6 @@ export default function ChatWindow({ partner, onBack }) {
     }, TYPING_TIMEOUT);
   };
 
-  // ── File pick ──────────────────────────────────────────
   const handleFileChange = (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -190,9 +172,7 @@ export default function ChatWindow({ partner, onBack }) {
       const reader = new FileReader();
       reader.onload = (ev) => setFilePreview(ev.target.result);
       reader.readAsDataURL(f);
-    } else {
-      setFilePreview(null);
-    }
+    } else setFilePreview(null);
   };
 
   const clearFile = () => {
@@ -200,18 +180,14 @@ export default function ChatWindow({ partner, onBack }) {
     setFilePreview(null);
   };
 
-  // ── Send ───────────────────────────────────────────────
   const handleSend = async () => {
     if ((!text.trim() && !file) || sending) return;
     setSending(true);
-
-    // Stop typing indicator
     socket?.emit("typing_stop", {
       sender_id: user.id,
       receiver_id: partner.id,
     });
     clearTimeout(typingTimerRef.current);
-
     try {
       if (file) {
         const type = file.type.startsWith("image/") ? "image" : "file";
@@ -223,7 +199,6 @@ export default function ChatWindow({ partner, onBack }) {
         if (res.success) setMessages((p) => [...p, res.data]);
         clearFile();
       } else {
-        // Optimistic
         const optimistic = {
           id: `opt_${Date.now()}`,
           _optimistic: true,
@@ -235,8 +210,6 @@ export default function ChatWindow({ partner, onBack }) {
           timestamp: new Date().toISOString(),
         };
         setMessages((p) => [...p, optimistic]);
-
-        // Via socket for real-time
         if (socket?.connected) {
           socket.emit("send_message", {
             sender_id: user.id,
@@ -249,9 +222,8 @@ export default function ChatWindow({ partner, onBack }) {
             receiver_id: partner.id,
             message: text.trim(),
           });
-          if (res.success) {
+          if (res.success)
             setMessages((p) => p.map((m) => (m._optimistic ? res.data : m)));
-          }
         }
         setText("");
       }
@@ -263,19 +235,6 @@ export default function ChatWindow({ partner, onBack }) {
     }
   };
 
-  // ── Delete ─────────────────────────────────────────────
-  const handleDelete = async (id) => {
-    try {
-      await deleteMessageApi(id);
-      setMessages((p) => p.filter((m) => m.id !== id));
-    } catch (e) {
-      console.error("[Chat] delete error", e);
-    }
-  };
-
-  const online = isOnline(partner?.id);
-
-  // ── Keyboard ───────────────────────────────────────────
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -283,40 +242,74 @@ export default function ChatWindow({ partner, onBack }) {
     }
   };
 
+  const online = isOnline(partner?.id);
+
+  // ── Empty state ──
   if (!partner) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center px-8">
-        <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
-          <Shield size={28} className="text-indigo-400" />
-        </div>
-        <div>
-          <p className="text-primary font-semibold">Select a conversation</p>
-          <p className="text-muted text-sm mt-1">
+      <div
+        className="flex-1 flex flex-col items-center justify-center gap-5 text-center px-8"
+        style={{ background: "#0D1424" }}
+      >
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: "spring", stiffness: 300, damping: 24 }}
+        >
+          <div
+            className="w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-4"
+            style={{
+              background: "rgba(99,102,241,0.1)",
+              border: "1px solid rgba(99,102,241,0.2)",
+              boxShadow: "0 0 40px rgba(99,102,241,0.08)",
+            }}
+          >
+            <MessageSquare size={32} style={{ color: "#4f46e5" }} />
+          </div>
+          <p className="font-bold text-base mb-1" style={{ color: "#e2e8f0" }}>
+            Select a conversation
+          </p>
+          <p className="text-sm" style={{ color: "#334155" }}>
             Choose someone from the sidebar to start chatting
           </p>
-        </div>
+        </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full relative"
+      style={{ background: "#0D1424" }}
+    >
       {/* ── Header ── */}
       <div
-        className="flex items-center gap-3 px-5 py-4 flex-shrink-0"
-        style={{ borderBottom: "1px solid var(--border)" }}
+        className="flex items-center gap-3 px-5 py-3.5 flex-shrink-0"
+        style={{
+          background: "#0B1120",
+          borderBottom: "1px solid rgba(255,255,255,0.05)",
+        }}
       >
-        {/* Mobile back button */}
         <button
           onClick={onBack}
-          className="md:hidden p-1.5 rounded-lg hover:bg-white/5 transition-colors"
+          className="md:hidden w-8 h-8 rounded-xl flex items-center justify-center transition-colors duration-150"
+          style={{ background: "rgba(255,255,255,0.04)" }}
+          onMouseEnter={(e) =>
+            (e.currentTarget.style.background = "rgba(255,255,255,0.08)")
+          }
+          onMouseLeave={(e) =>
+            (e.currentTarget.style.background = "rgba(255,255,255,0.04)")
+          }
         >
-          <ArrowLeft size={16} className="text-muted" />
+          <ArrowLeft size={15} style={{ color: "#64748b" }} />
         </button>
 
         {/* Avatar */}
         <div className="relative flex-shrink-0">
-          <div className="w-9 h-9 rounded-full overflow-hidden">
+          <div
+            className="w-10 h-10 rounded-xl overflow-hidden"
+            style={{ boxShadow: "0 0 0 2px rgba(99,102,241,0.2)" }}
+          >
             {partner.profile_pic ? (
               <img
                 src={partner.profile_pic}
@@ -324,36 +317,60 @@ export default function ChatWindow({ partner, onBack }) {
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="w-full h-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-sm font-bold">
+              <div
+                className="w-full h-full flex items-center justify-center text-white text-sm font-black"
+                style={{
+                  background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                }}
+              >
                 {partner.name?.[0]?.toUpperCase() || "U"}
               </div>
             )}
           </div>
-          {online && (
-            <span
-              className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2"
-              style={{ borderColor: "var(--bg-primary)" }}
-            />
-          )}
+          <span
+            className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 transition-colors duration-300"
+            style={{
+              background: online ? "#10b981" : "#334155",
+              borderColor: "#0B1120",
+              boxShadow: online ? "0 0 6px rgba(16,185,129,0.5)" : "none",
+            }}
+          />
         </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold text-primary truncate">
+            <p
+              className="text-sm font-bold truncate"
+              style={{ color: "#e2e8f0" }}
+            >
               {partner.name}
             </p>
             {partner.role === "admin" && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 font-semibold flex-shrink-0">
-                Admin
+              <span
+                className="text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 flex-shrink-0"
+                style={{
+                  background: "rgba(99,102,241,0.15)",
+                  color: "#818cf8",
+                  border: "1px solid rgba(99,102,241,0.25)",
+                }}
+              >
+                <Shield size={9} /> Admin
               </span>
             )}
           </div>
-          <p className="text-xs text-muted">
+          <p
+            className="text-[11px] flex items-center gap-1.5 mt-0.5"
+            style={{ color: online ? "#10b981" : "#334155" }}
+          >
             {online ? (
-              <span className="flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                Online
-              </span>
+              <>
+                <motion.span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"
+                  animate={{ opacity: [1, 0.4, 1] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                />
+                Online now
+              </>
             ) : (
               "Offline"
             )}
@@ -363,28 +380,59 @@ export default function ChatWindow({ partner, onBack }) {
 
       {/* ── Messages ── */}
       <div
-        ref={messagesContainerRef}
+        ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto py-4 space-y-2 custom-scrollbar"
+        className="flex-1 overflow-y-auto py-4 space-y-1 custom-scrollbar"
         style={{ overscrollBehavior: "contain" }}
       >
         {loadingMore && (
-          <div className="flex justify-center py-2">
-            <Loader2 size={16} className="text-indigo-400 animate-spin" />
+          <div className="flex justify-center py-3">
+            <Loader2
+              size={15}
+              style={{ color: "#4f46e5" }}
+              className="animate-spin"
+            />
           </div>
         )}
 
         {loading ? (
-          <div className="flex justify-center items-center h-full">
-            <Loader2 size={24} className="text-indigo-400 animate-spin" />
+          <div className="flex flex-col items-center justify-center h-full gap-3">
+            <Loader2
+              size={24}
+              style={{ color: "#4f46e5" }}
+              className="animate-spin"
+            />
+            <p className="text-xs" style={{ color: "#334155" }}>
+              Loading messages…
+            </p>
           </div>
         ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-8">
-            <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 flex items-center justify-center">
-              <Send size={20} className="text-indigo-400" />
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col items-center justify-center h-full gap-3 text-center px-8"
+          >
+            <div
+              className="w-14 h-14 rounded-2xl flex items-center justify-center"
+              style={{
+                background: "rgba(99,102,241,0.1)",
+                border: "1px solid rgba(99,102,241,0.15)",
+              }}
+            >
+              <Send size={22} style={{ color: "#4f46e5" }} />
             </div>
-            <p className="text-sm text-muted">No messages yet. Say hello! 👋</p>
-          </div>
+            <div>
+              <p
+                className="text-sm font-semibold mb-1"
+                style={{ color: "#e2e8f0" }}
+              >
+                No messages yet
+              </p>
+              <p className="text-xs" style={{ color: "#334155" }}>
+                Say hello to {partner.name?.split(" ")[0]} 👋
+              </p>
+            </div>
+          </motion.div>
         ) : (
           <AnimatePresence initial={false}>
             {messages.map((msg) => (
@@ -392,7 +440,14 @@ export default function ChatWindow({ partner, onBack }) {
                 key={msg.id}
                 msg={msg}
                 isMine={msg.sender_id === user?.id}
-                onDelete={handleDelete}
+                onDelete={async (id) => {
+                  try {
+                    await deleteMessageApi(id);
+                    setMessages((p) => p.filter((m) => m.id !== id));
+                  } catch (e) {
+                    console.error(e);
+                  }
+                }}
                 partnerName={partner.name}
                 partnerPic={partner.profile_pic}
               />
@@ -403,21 +458,24 @@ export default function ChatWindow({ partner, onBack }) {
         <AnimatePresence>
           {isTyping && <TypingIndicator name={partner.name} />}
         </AnimatePresence>
-
         <div ref={bottomRef} />
       </div>
 
-      {/* Scroll to bottom btn */}
+      {/* Scroll-to-bottom button */}
       <AnimatePresence>
         {showScrollBtn && (
           <motion.button
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
+            initial={{ opacity: 0, scale: 0.7, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.7, y: 8 }}
             onClick={() => scrollToBottom()}
-            className="absolute bottom-24 right-6 w-9 h-9 rounded-full bg-indigo-500 text-white flex items-center justify-center shadow-lg z-10"
+            className="absolute bottom-24 right-5 w-9 h-9 rounded-xl flex items-center justify-center z-10"
+            style={{
+              background: "linear-gradient(135deg, #4f46e5, #3b82f6)",
+              boxShadow: "0 4px 20px rgba(79,70,229,0.4)",
+            }}
           >
-            <ChevronDown size={16} />
+            <ChevronDown size={15} className="text-white" />
           </motion.button>
         )}
       </AnimatePresence>
@@ -429,8 +487,8 @@ export default function ChatWindow({ partner, onBack }) {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="px-4 py-2 flex items-center gap-3"
-            style={{ borderTop: "1px solid var(--border)" }}
+            className="px-4 py-3 flex items-center gap-3"
+            style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}
           >
             {filePreview ? (
               <img
@@ -439,18 +497,39 @@ export default function ChatWindow({ partner, onBack }) {
                 className="w-12 h-12 rounded-xl object-cover"
               />
             ) : (
-              <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center">
-                <Paperclip size={16} className="text-indigo-400" />
+              <div
+                className="w-12 h-12 rounded-xl flex items-center justify-center"
+                style={{
+                  background: "rgba(99,102,241,0.1)",
+                  border: "1px solid rgba(99,102,241,0.2)",
+                }}
+              >
+                <Paperclip size={16} style={{ color: "#818cf8" }} />
               </div>
             )}
-            <span className="text-xs text-primary flex-1 truncate">
-              {file.name}
-            </span>
+            <div className="flex-1 min-w-0">
+              <p
+                className="text-xs font-medium truncate"
+                style={{ color: "#e2e8f0" }}
+              >
+                {file.name}
+              </p>
+              <p className="text-[10px] mt-0.5" style={{ color: "#475569" }}>
+                {(file.size / 1024).toFixed(1)} KB
+              </p>
+            </div>
             <button
               onClick={clearFile}
-              className="p-1 rounded-lg hover:bg-white/10 transition-colors"
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
+              style={{ background: "rgba(239,68,68,0.1)" }}
+              onMouseEnter={(e) =>
+                (e.currentTarget.style.background = "rgba(239,68,68,0.2)")
+              }
+              onMouseLeave={(e) =>
+                (e.currentTarget.style.background = "rgba(239,68,68,0.1)")
+              }
             >
-              <X size={14} className="text-muted" />
+              <X size={12} style={{ color: "#f87171" }} />
             </button>
           </motion.div>
         )}
@@ -458,15 +537,29 @@ export default function ChatWindow({ partner, onBack }) {
 
       {/* ── Input bar ── */}
       <div
-        className="px-4 py-3 flex items-end gap-3 flex-shrink-0"
-        style={{ borderTop: "1px solid var(--border)" }}
+        className="px-4 py-3 flex items-end gap-2.5 flex-shrink-0"
+        style={{
+          background: "#0B1120",
+          borderTop: "1px solid rgba(255,255,255,0.05)",
+        }}
       >
-        {/* File attach */}
-        <label className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer hover:bg-white/5 transition-colors">
-          <Paperclip
-            size={16}
-            className="text-muted hover:text-indigo-400 transition-colors"
-          />
+        {/* Attach */}
+        <label
+          className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-150"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.07)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(99,102,241,0.12)";
+            e.currentTarget.style.borderColor = "rgba(99,102,241,0.3)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "rgba(255,255,255,0.04)";
+            e.currentTarget.style.borderColor = "rgba(255,255,255,0.07)";
+          }}
+        >
+          <Paperclip size={15} style={{ color: "#475569" }} />
           <input
             type="file"
             className="hidden"
@@ -476,33 +569,67 @@ export default function ChatWindow({ partner, onBack }) {
         </label>
 
         {/* Textarea */}
-        <textarea
-          ref={inputRef}
-          value={text}
-          onChange={(e) => handleTyping(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Type a message…"
-          rows={1}
-          className="flex-1 resize-none bg-[#111827] border border-[#1E293B] rounded-xl px-4 py-2.5 text-sm text-primary placeholder-slate-600 focus:outline-none focus:border-indigo-500/50 transition-colors leading-relaxed"
-          style={{ maxHeight: "120px", overflowY: "auto" }}
-          onInput={(e) => {
-            e.target.style.height = "auto";
-            e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
-          }}
-        />
+        <div className="flex-1 relative">
+          <textarea
+            ref={inputRef}
+            value={text}
+            onChange={(e) => handleTyping(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={`Message ${partner.name?.split(" ")[0]}…`}
+            rows={1}
+            className="w-full resize-none px-4 py-2.5 text-sm outline-none leading-relaxed rounded-xl transition-all duration-200"
+            style={{
+              background: "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(255,255,255,0.07)",
+              color: "#e2e8f0",
+              maxHeight: "120px",
+              overflowY: "auto",
+            }}
+            onFocus={(e) => {
+              e.target.style.borderColor = "rgba(99,102,241,0.4)";
+              e.target.style.background = "rgba(99,102,241,0.05)";
+            }}
+            onBlur={(e) => {
+              e.target.style.borderColor = "rgba(255,255,255,0.07)";
+              e.target.style.background = "rgba(255,255,255,0.04)";
+            }}
+            onInput={(e) => {
+              e.target.style.height = "auto";
+              e.target.style.height =
+                Math.min(e.target.scrollHeight, 120) + "px";
+            }}
+          />
+        </div>
 
         {/* Send */}
         <motion.button
           onClick={handleSend}
           disabled={(!text.trim() && !file) || sending}
           whileHover={{ scale: 1.06 }}
-          whileTap={{ scale: 0.94 }}
-          className="flex-shrink-0 w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center disabled:opacity-40 transition-opacity shadow-lg"
+          whileTap={{ scale: 0.92 }}
+          className="flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200"
+          style={{
+            background:
+              text.trim() || file
+                ? "linear-gradient(135deg, #4f46e5, #3b82f6)"
+                : "rgba(255,255,255,0.05)",
+            boxShadow:
+              text.trim() || file ? "0 0 20px rgba(79,70,229,0.35)" : "none",
+            border:
+              text.trim() || file ? "none" : "1px solid rgba(255,255,255,0.07)",
+            opacity: sending ? 0.7 : 1,
+          }}
         >
           {sending ? (
             <Loader2 size={15} className="text-white animate-spin" />
           ) : (
-            <Send size={15} className="text-white" />
+            <Send
+              size={15}
+              style={{
+                color: text.trim() || file ? "white" : "#334155",
+                transform: "rotate(0deg)",
+              }}
+            />
           )}
         </motion.button>
       </div>

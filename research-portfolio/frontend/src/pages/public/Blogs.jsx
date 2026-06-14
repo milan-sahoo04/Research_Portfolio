@@ -178,7 +178,7 @@ export default function Blogs() {
                       )}
                     </div>
                     <Link
-                      to={`/blogs/${blog._id}`}
+                      to={`/blogs/${blog.id}`}
                       className="flex items-center gap-1 text-xs font-semibold"
                       style={{ color: "#6366f1" }}
                     >

@@ -147,7 +147,7 @@ export default function Projects() {
               const color = COLORS[i % COLORS.length];
               return (
                 <motion.div
-                  key={project._id}
+                  key={project.id}
                   initial={{ opacity: 0, y: 30 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: i * 0.06 }}
@@ -197,7 +197,7 @@ export default function Projects() {
                     </div>
                   )}
                   <Link
-                    to={`/projects/${project._id}`}
+                    to={`/projects/${project.id}`}
                     className="flex items-center gap-1.5 text-sm font-semibold"
                     style={{ color: color.text }}
                   >

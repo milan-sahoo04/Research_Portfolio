@@ -65,6 +65,11 @@ export const deleteUserApi = async (id) => {
   return data;
 };
 
+export const hardDeleteUserApi = async (id) => {
+  const { data } = await axios.delete(`/users/admin/${id}/permanent`);
+  return data;
+};
+
 // ── ADMIN: Bulk delete ───────────────────────────────────
 export const bulkDeleteUsersApi = async (ids) => {
   const { data } = await axios.delete("/users/admin/bulk", { data: { ids } });

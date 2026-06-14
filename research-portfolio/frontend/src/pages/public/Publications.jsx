@@ -17,7 +17,7 @@ import {
   FileText,
 } from "lucide-react";
 import { API_URL } from "../../utils/constants";
-
+import { Link } from "react-router-dom";
 // ─── API helpers ──────────────────────────────────────────
 async function fetchPublications({
   page = 1,
@@ -55,10 +55,13 @@ function PublicationCard({ pub, index }) {
       )}
 
       {/* Title */}
+
       <div className="pr-16">
-        <h3 className="text-white font-semibold text-base leading-snug group-hover:text-indigo-300 transition-colors line-clamp-2">
-          {pub.title}
-        </h3>
+        <Link to={`/publications/${pub.id}`}>
+          <h3 className="text-white font-semibold text-base leading-snug group-hover:text-indigo-300 transition-colors line-clamp-2">
+            {pub.title}
+          </h3>
+        </Link>
       </div>
 
       {/* Meta */}
@@ -107,6 +110,12 @@ function PublicationCard({ pub, index }) {
 
       {/* Actions */}
       <div className="flex items-center gap-2 mt-auto pt-2 border-t border-[#1E293B]">
+        <Link
+          to={`/publications/${pub.id}`}
+          className="flex items-center gap-1.5 text-xs text-violet-400 hover:text-violet-300 transition-colors px-3 py-1.5 rounded-lg hover:bg-violet-500/10"
+        >
+          Read more
+        </Link>
         {pub.doi && (
           <a
             href={pub.doi}

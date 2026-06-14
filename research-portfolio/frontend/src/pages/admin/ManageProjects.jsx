@@ -8,10 +8,6 @@ import {
   Edit3,
   X,
   Star,
-  Globe,
-  Lock,
-  ExternalLink,
-  GitBranch, // ✅ FIX 1: replaced non-existent "Github" with "GitBranch"
   Loader2,
   RefreshCw,
   FolderOpen,
@@ -20,9 +16,7 @@ import {
   CheckCircle,
   XCircle,
   AlertTriangle,
-  MoreVertical,
   ChevronDown,
-  Filter,
   Upload,
 } from "lucide-react";
 import {
@@ -35,10 +29,15 @@ import {
   getProjectStatsApi,
 } from "../../api/adminApi";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ✅ FIX 2: Field lifted OUTSIDE ProjectModal so React doesn't remount it on
-//    every parent re-render, which caused inputs to lose focus and reset.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Category options (matches DB check constraint exactly) ──
+const CATEGORY_OPTIONS = [
+  { value: "", label: "Select category..." },
+  { value: "journal", label: "Journal" },
+  { value: "conference", label: "Conference" },
+  { value: "case_study", label: "Case Study" },
+];
+
+// ─── Field — lifted outside modal so React never remounts it ─
 function Field({ label, name, type = "text", options, rows, form, onChange }) {
   return (
     <div>
@@ -82,7 +81,7 @@ function Field({ label, name, type = "text", options, rows, form, onChange }) {
   );
 }
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
+// ─── Toast ────────────────────────────────────────────────────
 function Toast({ toasts }) {
   return (
     <div className="fixed top-5 right-5 z-[999] flex flex-col gap-2 pointer-events-none">
@@ -113,6 +112,7 @@ function Toast({ toasts }) {
   );
 }
 
+// ─── Confirm Modal ────────────────────────────────────────────
 function ConfirmModal({ open, title, message, onConfirm, onCancel, loading }) {
   return (
     <AnimatePresence>
@@ -162,7 +162,7 @@ function ConfirmModal({ open, title, message, onConfirm, onCancel, loading }) {
   );
 }
 
-// ─── Project Form Modal ───────────────────────────────────────────────────────
+// ─── Project Form Modal ───────────────────────────────────────
 function ProjectModal({ project, onClose, onSave }) {
   const isEdit = !!project?.id;
 
@@ -186,8 +186,6 @@ function ProjectModal({ project, onClose, onSave }) {
   const [saving, setSaving] = useState(false);
   const fileRef = useRef(null);
 
-  // ✅ Stable onChange factory — passes down to Field so it doesn't need
-  //    to be redefined inside the component tree each render.
   const handleChange = useCallback(
     (key) => (e) =>
       setForm((prev) => ({
@@ -211,7 +209,7 @@ function ProjectModal({ project, onClose, onSave }) {
     try {
       const fd = new FormData();
       Object.entries(form).forEach(([k, v]) => {
-        if (v !== "" && v !== null) fd.append(k, v);
+        if (v !== "" && v !== null && v !== undefined) fd.append(k, v);
       });
       if (imageFile) fd.append("image", imageFile);
       const res = isEdit
@@ -301,7 +299,6 @@ function ProjectModal({ project, onClose, onSave }) {
               />
             </div>
 
-            {/* ✅ All Field calls now pass `form` and `onChange` as props */}
             <Field
               label="Title *"
               name="title"
@@ -322,6 +319,7 @@ function ProjectModal({ project, onClose, onSave }) {
                 name="category"
                 form={form}
                 onChange={handleChange}
+                options={CATEGORY_OPTIONS}
               />
               <Field
                 label="Year"
@@ -391,7 +389,7 @@ function ProjectModal({ project, onClose, onSave }) {
                   { value: "private", label: "Private" },
                 ]}
               />
-              <div className="flex flex-col justify-end">
+              <div className="flex flex-col justify-end pb-0.5">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -434,7 +432,7 @@ function ProjectModal({ project, onClose, onSave }) {
   );
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Main Page ────────────────────────────────────────────────
 export default function ManageProjects() {
   const [projects, setProjects] = useState([]);
   const [stats, setStats] = useState(null);
@@ -447,6 +445,7 @@ export default function ManageProjects() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [selected, setSelected] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
@@ -465,10 +464,10 @@ export default function ManageProjects() {
       const r = await getProjectStatsApi();
       if (r.success) setStats(r.data);
     } catch {}
-  }, []); // no deps — only called explicitly
+  }, []);
 
   const fetchProjects = useCallback(
-    async (pg = 1, q = search, st = statusFilter) => {
+    async (pg = 1, q = search, st = statusFilter, cat = categoryFilter) => {
       setLoading(true);
       try {
         const r = await getAllProjectsAdminApi({
@@ -476,6 +475,7 @@ export default function ManageProjects() {
           limit: 15,
           search: q,
           status: st,
+          category: cat,
         });
         if (r.success) {
           setProjects(r.data);
@@ -487,12 +487,9 @@ export default function ManageProjects() {
         setLoading(false);
       }
     },
-    [search, statusFilter, addToast],
+    [search, statusFilter, categoryFilter, addToast],
   );
 
-  // ✅ FIX: single useEffect, fetches stats + projects together on mount.
-  //    page / statusFilter changes re-fetch projects only (no stats needed).
-  //    Using refs to avoid stale-closure re-runs from useCallback deps.
   const fetchProjectsRef = useRef(fetchProjects);
   const fetchStatsRef = useRef(fetchStats);
   useEffect(() => {
@@ -505,21 +502,18 @@ export default function ManageProjects() {
   const isFirstMount = useRef(true);
 
   useEffect(() => {
-    // Mount: load both in parallel
     Promise.all([fetchProjectsRef.current(page), fetchStatsRef.current()]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // mount only
+  }, []);
 
   useEffect(() => {
-    // Skip the very first run (already handled by mount effect above)
-    // Only fires on subsequent page or statusFilter changes
     if (isFirstMount.current) {
       isFirstMount.current = false;
       return;
     }
     fetchProjectsRef.current(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, statusFilter]);
+  }, [page, statusFilter, categoryFilter]);
 
   const handleSearch = (v) => {
     setSearch(v);
@@ -609,7 +603,6 @@ export default function ManageProjects() {
     setSelected((p) =>
       p.includes(id) ? p.filter((x) => x !== id) : [...p, id],
     );
-
   const toggleAll = () =>
     setSelected(
       selected.length === projects.length ? [] : projects.map((p) => p.id),
@@ -712,6 +705,7 @@ export default function ManageProjects() {
           background: "linear-gradient(135deg,#0F172A 0%,#0B1120 100%)",
         }}
       >
+        {/* Search */}
         <div className="relative flex-1 min-w-[200px]">
           <Search
             size={14}
@@ -732,6 +726,29 @@ export default function ManageProjects() {
             </button>
           )}
         </div>
+
+        {/* Category filter */}
+        <div className="relative">
+          <select
+            value={categoryFilter}
+            onChange={(e) => {
+              setCategoryFilter(e.target.value);
+              setPage(1);
+            }}
+            className="pl-4 pr-8 py-2.5 bg-[#111827] border border-[#1E293B] rounded-xl text-slate-300 text-sm focus:outline-none focus:border-indigo-500/50 transition-all appearance-none"
+          >
+            <option value="">All Categories</option>
+            <option value="journal">Journal</option>
+            <option value="conference">Conference</option>
+            <option value="case_study">Case Study</option>
+          </select>
+          <ChevronDown
+            size={12}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
+          />
+        </div>
+
+        {/* Status filter */}
         <div className="relative">
           <select
             value={statusFilter}
@@ -829,13 +846,17 @@ export default function ManageProjects() {
                         {p.title}
                       </p>
                       <p className="text-slate-600 text-xs truncate">
-                        {p.category || "—"}
+                        {p.category ? p.category.replace("_", " ") : "—"}
                       </p>
                     </div>
                   </div>
                   <div className="hidden md:block">
                     <span
-                      className={`text-xs px-2.5 py-1 rounded-lg font-medium ${p.status === "Completed" ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20" : "bg-sky-500/15 text-sky-400 border border-sky-500/20"}`}
+                      className={`text-xs px-2.5 py-1 rounded-lg font-medium ${
+                        p.status === "Completed"
+                          ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
+                          : "bg-sky-500/15 text-sky-400 border border-sky-500/20"
+                      }`}
                     >
                       {p.status || "—"}
                     </span>

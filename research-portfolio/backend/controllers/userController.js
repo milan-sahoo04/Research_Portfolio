@@ -25,7 +25,6 @@ function fail(res, message, statusCode = 400) {
   return res.status(statusCode).json({ success: false, message });
 }
 
-/** Strip all sensitive fields before sending user to client */
 function sanitizeUser(user) {
   const { ...safe } = user;
   return safe;
@@ -91,17 +90,14 @@ export const getAllUsers = async (req, res) => {
       .order(sortCol, { ascending })
       .range(offset, offset + limitNum - 1);
 
-    // Exclude soft-deleted by default
     if (includeDeleted !== "true") {
       query = query.is("deleted_at", null);
     }
 
-    // Filter by role
     if (role && ["admin", "user"].includes(role)) {
       query = query.eq("role", role);
     }
 
-    // Search across name and email
     if (search?.trim()) {
       query = query.or(
         `name.ilike.%${search.trim()}%,email.ilike.%${search.trim()}%`,
@@ -176,7 +172,6 @@ export const getMyProfile = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. UPDATE USER  (admin — can change role, is_active, is_super_admin)
 // PUT /api/users/admin/:id
-// Body: { name, email, role, bio, phone, is_active, is_super_admin, password? }
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateUser = async (req, res) => {
   try {
@@ -192,7 +187,6 @@ export const updateUser = async (req, res) => {
       password,
     } = req.body;
 
-    // ── Verify user exists ──
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("id, email, role")
@@ -202,7 +196,6 @@ export const updateUser = async (req, res) => {
 
     if (fetchErr || !existing) return fail(res, "User not found.", 404);
 
-    // ── Validate email uniqueness if changing ──
     if (email && email.toLowerCase() !== existing.email) {
       const { data: emailTaken } = await supabaseAdmin
         .from(TABLES.USERS)
@@ -214,7 +207,6 @@ export const updateUser = async (req, res) => {
         return fail(res, "Email is already in use by another account.", 409);
     }
 
-    // ── Build update payload (only include provided fields) ──
     const updates = { updated_at: new Date().toISOString() };
 
     if (name?.trim()) updates.name = name.trim();
@@ -226,12 +218,11 @@ export const updateUser = async (req, res) => {
     if (is_super_admin !== undefined)
       updates.is_super_admin = Boolean(is_super_admin);
 
-    // ── Optional: admin can reset a user's password ──
     if (password) {
       if (password.length < 8)
         return fail(res, "Password must be at least 8 characters.");
       updates.password = await bcrypt.hash(password, SALT_ROUNDS);
-      updates.refresh_token = null; // Force re-login
+      updates.refresh_token = null;
     }
 
     const { data: updated, error: updateErr } = await supabaseAdmin
@@ -262,7 +253,6 @@ export const updateUser = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. UPDATE OWN PROFILE  (authenticated user — limited fields)
 // PUT /api/users/me
-// Body: { name, bio, phone }
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateMyProfile = async (req, res) => {
   try {
@@ -303,27 +293,24 @@ export const updateMyProfile = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. SOFT DELETE USER
 // DELETE /api/users/admin/:id
-// Sets deleted_at timestamp (does NOT remove from DB)
+// Sets deleted_at + is_active=false — row stays in DB (recoverable)
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteUser = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Prevent self-deletion
     if (id === req.user.id)
       return fail(res, "You cannot delete your own account.", 400);
 
-    // Verify user exists and not already deleted
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from(TABLES.USERS)
-      .select("id, name, email, role")
+      .select("id, name, email, role, is_super_admin")
       .eq("id", id)
       .is("deleted_at", null)
       .single();
 
     if (fetchErr || !existing) return fail(res, "User not found.", 404);
 
-    // Prevent deleting another super admin unless requester is also super admin
     if (existing.is_super_admin && !req.user.is_super_admin)
       return fail(res, "Cannot delete a super admin account.", 403);
 
@@ -332,7 +319,7 @@ export const deleteUser = async (req, res) => {
       .update({
         deleted_at: new Date().toISOString(),
         is_active: false,
-        refresh_token: null, // Invalidate all sessions
+        refresh_token: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
@@ -348,9 +335,81 @@ export const deleteUser = async (req, res) => {
 
     return ok(res, {
       message: `User "${existing.name}" has been deleted successfully.`,
+      deletedId: id,
     });
   } catch (err) {
     console.error("[User] deleteUser exception:", err.message);
+    return fail(res, "Server error.", 500);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6b. HARD DELETE USER  ← NEW
+// DELETE /api/users/admin/:id/permanent
+// Permanently removes the row from DB — CANNOT be undone
+// Also cleans up the user's profile picture from storage
+// ─────────────────────────────────────────────────────────────────────────────
+export const hardDeleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (id === req.user.id)
+      return fail(res, "You cannot permanently delete your own account.", 400);
+
+    // Fetch first (works whether soft-deleted or active)
+    const { data: existing, error: fetchErr } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .select("id, name, email, role, profile_pic, is_super_admin")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) return fail(res, "User not found.", 404);
+
+    if (existing.role === "admin" && !req.user.is_super_admin)
+      return fail(
+        res,
+        "Only a super admin can permanently delete an admin account.",
+        403,
+      );
+
+    // Clean up profile picture from storage first (fire-and-forget on failure)
+    if (existing.profile_pic) {
+      try {
+        const oldPath = extractStoragePath(
+          existing.profile_pic,
+          STORAGE_BUCKETS.PROFILE_PICS,
+        );
+        await deleteFile(STORAGE_BUCKETS.PROFILE_PICS, oldPath);
+        console.log(`[User] Deleted profile pic for user ${id}`);
+      } catch (e) {
+        console.warn(
+          "[User] hardDelete — could not remove profile pic:",
+          e.message,
+        );
+      }
+    }
+
+    // Hard delete the row
+    const { error: deleteErr } = await supabaseAdmin
+      .from(TABLES.USERS)
+      .delete()
+      .eq("id", id);
+
+    if (deleteErr) {
+      console.error("[User] hardDeleteUser DB error:", deleteErr.message);
+      return fail(res, "Failed to permanently delete user.", 500);
+    }
+
+    console.log(
+      `[User] ⚠️  HARD-deleted user ${id} (${existing.email}) by admin: ${req.user.email}`,
+    );
+
+    return ok(res, {
+      message: `User "${existing.name}" permanently deleted.`,
+      deletedId: id,
+    });
+  } catch (err) {
+    console.error("[User] hardDeleteUser exception:", err.message);
     return fail(res, "Server error.", 500);
   }
 };
@@ -425,7 +484,7 @@ export const toggleUserStatus = async (req, res) => {
       .from(TABLES.USERS)
       .update({
         is_active: newStatus,
-        refresh_token: newStatus ? undefined : null, // revoke sessions on deactivate
+        refresh_token: newStatus ? undefined : null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
@@ -450,25 +509,19 @@ export const toggleUserStatus = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 9. UPLOAD PROFILE PICTURE  (admin for any user OR self)
+// 9. UPLOAD PROFILE PICTURE
 // POST /api/users/admin/:id/profile-pic  OR  POST /api/users/me/profile-pic
-// Content-Type: multipart/form-data  →  field name: "profile_pic"
-// Handled by multer middleware in routes
 // ─────────────────────────────────────────────────────────────────────────────
 export const uploadProfilePic = async (req, res) => {
   try {
     const targetId = req.params.id || req.user.id;
 
-    // ── Validate file ──
     if (!req.file) return fail(res, "No image file provided.");
-
     if (!ALLOWED_MIME_TYPES.includes(req.file.mimetype))
       return fail(res, "Invalid file type. Allowed: JPG, PNG, WebP, GIF.");
-
     if (req.file.size > MAX_FILE_SIZE_BYTES)
       return fail(res, "File too large. Maximum size is 5 MB.");
 
-    // ── Fetch existing user to get old pic URL ──
     const { data: existing, error: fetchErr } = await supabaseAdmin
       .from(TABLES.USERS)
       .select("id, name, profile_pic")
@@ -478,7 +531,6 @@ export const uploadProfilePic = async (req, res) => {
 
     if (fetchErr || !existing) return fail(res, "User not found.", 404);
 
-    // ── Upload new image to Supabase Storage ──
     const ext = req.file.mimetype.split("/")[1].replace("jpeg", "jpg");
     const filePath = `${targetId}/profile-${Date.now()}.${ext}`;
 
@@ -489,7 +541,6 @@ export const uploadProfilePic = async (req, res) => {
       req.file.mimetype,
     );
 
-    // ── Update DB ──
     const { data: updated, error: updateErr } = await supabaseAdmin
       .from(TABLES.USERS)
       .update({ profile_pic: publicUrl, updated_at: new Date().toISOString() })
@@ -502,7 +553,6 @@ export const uploadProfilePic = async (req, res) => {
       return fail(res, "Failed to save profile picture.", 500);
     }
 
-    // ── Delete old profile pic from storage (fire-and-forget) ──
     if (existing.profile_pic) {
       try {
         const oldPath = extractStoragePath(
@@ -546,7 +596,6 @@ export const deleteProfilePic = async (req, res) => {
     if (!existing.profile_pic)
       return fail(res, "No profile picture to remove.", 400);
 
-    // Remove from storage
     try {
       const oldPath = extractStoragePath(
         existing.profile_pic,
@@ -557,7 +606,6 @@ export const deleteProfilePic = async (req, res) => {
       console.warn("[User] deleteProfilePic storage error:", e.message);
     }
 
-    // Clear from DB
     await supabaseAdmin
       .from(TABLES.USERS)
       .update({ profile_pic: null, updated_at: new Date().toISOString() })
@@ -584,40 +632,29 @@ export const getUserStats = async (req, res) => {
       deletedRes,
       newTodayRes,
     ] = await Promise.all([
-      // Total (non-deleted)
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
         .is("deleted_at", null),
-
-      // Active
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
         .eq("is_active", true)
         .is("deleted_at", null),
-
-      // Admins
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
         .eq("role", "admin")
         .is("deleted_at", null),
-
-      // Verified
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
         .eq("is_verified", true)
         .is("deleted_at", null),
-
-      // Soft-deleted
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
         .not("deleted_at", "is", null),
-
-      // New today
       supabaseAdmin
         .from(TABLES.USERS)
         .select("id", { count: "exact", head: true })
@@ -643,7 +680,7 @@ export const getUserStats = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 12. BULK DELETE USERS
+// 12. BULK DELETE USERS  (soft delete)
 // DELETE /api/users/admin/bulk
 // Body: { ids: ["uuid1", "uuid2"] }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -681,6 +718,7 @@ export const bulkDeleteUsers = async (req, res) => {
     return ok(res, {
       message: `${count} user(s) deleted successfully.`,
       deleted: count,
+      deletedIds: ids,
     });
   } catch (err) {
     console.error("[User] bulkDeleteUsers exception:", err.message);
@@ -689,9 +727,8 @@ export const bulkDeleteUsers = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 13. GET ADMINS FOR CHAT  (any authenticated user)
+// 13. GET ADMINS FOR CHAT
 // GET /api/users/admins
-// Returns only active, non-deleted admins — safe for regular users
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAdminsForChat = async (req, res) => {
   try {

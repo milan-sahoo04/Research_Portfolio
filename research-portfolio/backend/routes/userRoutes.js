@@ -13,6 +13,7 @@ import {
   updateUser,
   updateMyProfile,
   deleteUser,
+  hardDeleteUser,
   restoreUser,
   toggleUserStatus,
   uploadProfilePic,
@@ -28,14 +29,10 @@ const router = express.Router();
 
 // ─────────────────────────────────────────────
 // MULTER — in-memory storage for profile pics
-// File is available as req.file.buffer
 // ─────────────────────────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 5 * 1024 * 1024, // 5 MB
-    files: 1,
-  },
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => {
     const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
     if (allowed.includes(file.mimetype)) {
@@ -59,36 +56,29 @@ const updateUserValidation = [
     .withMessage("Name cannot be empty.")
     .isLength({ max: 100 })
     .withMessage("Name must be under 100 characters."),
-
   body("email")
     .optional()
     .trim()
     .isEmail()
     .withMessage("Invalid email address.")
     .normalizeEmail(),
-
   body("role")
     .optional()
     .isIn(["admin", "user"])
     .withMessage("Role must be 'admin' or 'user'."),
-
   body("bio")
     .optional()
     .isLength({ max: 500 })
     .withMessage("Bio must be under 500 characters."),
-
   body("phone").optional().isMobilePhone().withMessage("Invalid phone number."),
-
   body("password")
     .optional()
     .isLength({ min: 8 })
     .withMessage("Password must be at least 8 characters."),
-
   body("is_active")
     .optional()
     .isBoolean()
     .withMessage("is_active must be true or false."),
-
   body("is_super_admin")
     .optional()
     .isBoolean()
@@ -103,12 +93,10 @@ const updateSelfValidation = [
     .withMessage("Name cannot be empty.")
     .isLength({ max: 100 })
     .withMessage("Name must be under 100 characters."),
-
   body("bio")
     .optional()
     .isLength({ max: 500 })
     .withMessage("Bio must be under 500 characters."),
-
   body("phone").optional().isMobilePhone().withMessage("Invalid phone number."),
 ];
 
@@ -121,43 +109,30 @@ const bulkDeleteValidation = [
 
 // ─────────────────────────────────────────────
 // SELF ROUTES  (any authenticated user)
-// All require valid JWT — no admin role needed
 // ─────────────────────────────────────────────
-
-// GET  /api/users/me  — get own profile
 router.get("/me", protect, getMyProfile);
-
-// PUT  /api/users/me  — update own name, bio, phone
 router.put("/me", protect, updateSelfValidation, updateMyProfile);
-
-// POST /api/users/me/profile-pic — upload own profile picture
 router.post(
   "/me/profile-pic",
   protect,
   upload.single("profile_pic"),
   uploadProfilePic,
 );
-
-// DELETE /api/users/me/profile-pic — remove own profile picture
 router.delete("/me/profile-pic", protect, deleteProfilePic);
-
 router.get("/admins", protect, getAdminsForChat);
 
 // ─────────────────────────────────────────────
-// ADMIN ROUTES  (protect + adminOnly on all)
+// ADMIN ROUTES
 // ─────────────────────────────────────────────
 
-// GET /api/users/admin/stats  — dashboard counts
-// MUST be defined before /admin/:id to avoid "stats" being treated as a UUID
+// Stats — must be before /admin/:id
 router.get("/admin/stats", protect, adminOnly, getUserStats);
 
-// GET /api/users/admin  — list all users with filters + pagination
+// List / get
 router.get("/admin", protect, adminOnly, getAllUsers);
-
-// GET /api/users/admin/:id  — get single user
 router.get("/admin/:id", protect, adminOnly, uuidParam, getUserById);
 
-// PUT /api/users/admin/:id  — update any user field
+// Update
 router.put(
   "/admin/:id",
   protect,
@@ -167,8 +142,7 @@ router.put(
   updateUser,
 );
 
-// DELETE /api/users/admin/bulk  — soft delete multiple users
-// MUST be before /admin/:id
+// Bulk soft-delete — must be before /admin/:id
 router.delete(
   "/admin/bulk",
   protect,
@@ -177,13 +151,23 @@ router.delete(
   bulkDeleteUsers,
 );
 
-// DELETE /api/users/admin/:id  — soft delete single user
+// Soft delete (sets deleted_at, recoverable via restore)
 router.delete("/admin/:id", protect, adminOnly, uuidParam, deleteUser);
 
-// PUT /api/users/admin/:id/restore  — restore a soft-deleted user
+// ── Hard (permanent) delete ── NEW
+// DELETE /api/users/admin/:id/permanent
+router.delete(
+  "/admin/:id/permanent",
+  protect,
+  adminOnly,
+  uuidParam,
+  hardDeleteUser,
+);
+
+// Restore soft-deleted user
 router.put("/admin/:id/restore", protect, adminOnly, uuidParam, restoreUser);
 
-// PUT /api/users/admin/:id/toggle-status  — activate / deactivate
+// Toggle active/inactive
 router.put(
   "/admin/:id/toggle-status",
   protect,
@@ -192,7 +176,7 @@ router.put(
   toggleUserStatus,
 );
 
-// POST /api/users/admin/:id/profile-pic  — admin uploads pic for any user
+// Profile pics
 router.post(
   "/admin/:id/profile-pic",
   protect,
@@ -201,8 +185,6 @@ router.post(
   upload.single("profile_pic"),
   uploadProfilePic,
 );
-
-// DELETE /api/users/admin/:id/profile-pic  — admin removes pic for any user
 router.delete(
   "/admin/:id/profile-pic",
   protect,
@@ -213,7 +195,6 @@ router.delete(
 
 // ─────────────────────────────────────────────
 // MULTER ERROR HANDLER
-// Catches multer-specific errors (file size, type)
 // ─────────────────────────────────────────────
 // eslint-disable-next-line no-unused-vars
 router.use((err, _req, res, _next) => {

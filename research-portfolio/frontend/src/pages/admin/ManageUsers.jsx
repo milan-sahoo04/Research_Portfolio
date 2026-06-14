@@ -30,7 +30,7 @@ import {
   getAllUsersApi,
   getUserStatsApi,
   updateUserApi,
-  deleteUserApi,
+  hardDeleteUserApi,
   bulkDeleteUsersApi,
   restoreUserApi,
   toggleUserStatusApi,
@@ -176,7 +176,6 @@ function EditUserModal({ user, onClose, onSave }) {
         className="w-full max-w-lg rounded-2xl border border-[#1E293B] overflow-hidden flex flex-col max-h-[92vh]"
         style={{ background: "#0A0F1E" }}
       >
-        {/* Header */}
         <div
           className="flex items-center justify-between px-6 py-4 border-b border-[#1E293B]"
           style={{ background: "linear-gradient(135deg,#0F172A,#0A0F1E)" }}
@@ -195,9 +194,7 @@ function EditUserModal({ user, onClose, onSave }) {
           </button>
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {/* Avatar preview */}
           <div className="flex items-center gap-3 p-4 rounded-xl bg-white/[0.02] border border-[#1E293B]">
             <div className="w-12 h-12 rounded-full overflow-hidden flex-shrink-0">
               {user.profile_pic ? (
@@ -295,7 +292,6 @@ function EditUserModal({ user, onClose, onSave }) {
             />
           </div>
 
-          {/* Active toggle */}
           <label className="flex items-center gap-3 cursor-pointer">
             <div
               onClick={() =>
@@ -317,7 +313,6 @@ function EditUserModal({ user, onClose, onSave }) {
           )}
         </div>
 
-        {/* Footer */}
         <div
           className="px-6 py-4 border-t border-[#1E293B] flex gap-3"
           style={{ background: "linear-gradient(135deg,#0F172A,#0A0F1E)" }}
@@ -405,7 +400,6 @@ function UserRow({
         </div>
       </div>
 
-      {/* Status badge */}
       <div className="hidden md:flex items-center gap-1.5">
         <span
           className={`w-1.5 h-1.5 rounded-full ${user.is_active ? "bg-emerald-400" : "bg-slate-600"}`}
@@ -417,7 +411,6 @@ function UserRow({
         </span>
       </div>
 
-      {/* Verified */}
       <div className="hidden lg:flex items-center">
         {user.is_verified ? (
           <CheckCircle size={13} className="text-emerald-400" />
@@ -426,7 +419,6 @@ function UserRow({
         )}
       </div>
 
-      {/* Joined */}
       <p className="hidden lg:block text-slate-600 text-xs whitespace-nowrap">
         {new Date(user.created_at).toLocaleDateString("en-US", {
           month: "short",
@@ -435,7 +427,6 @@ function UserRow({
         })}
       </p>
 
-      {/* Actions */}
       <div className="flex items-center gap-1">
         {isDeleted ? (
           <button
@@ -566,16 +557,17 @@ export default function ManageUsers() {
     }, 400);
   };
 
+  // ── Hard delete (permanent) ──────────────────────────────
   const handleDelete = (user) => {
     setConfirm({
       open: true,
-      title: "Delete User",
-      message: `Soft-delete "${user.name}"? They won't be able to log in but data is preserved.`,
+      title: "Permanently Delete User",
+      message: `This will permanently remove "${user.name}" and all their data. This cannot be undone.`,
       danger: true,
       onConfirm: async () => {
         setActionLoading(true);
         try {
-          const r = await deleteUserApi(user.id);
+          const r = await hardDeleteUserApi(user.id);
           if (r.success) {
             fetchUsersRef.current(page);
             fetchStatsRef.current();
@@ -633,21 +625,34 @@ export default function ManageUsers() {
     }
   };
 
+  // ── Bulk hard delete (permanent) ─────────────────────────
   const handleBulkDelete = () => {
     setConfirm({
       open: true,
-      title: "Bulk Delete",
-      message: `Soft-delete ${selected.length} user(s)?`,
+      title: "Permanently Delete Users",
+      message: `This will permanently remove ${selected.length} user(s) and all their data. This cannot be undone.`,
       danger: true,
       onConfirm: async () => {
         setActionLoading(true);
         try {
-          const r = await bulkDeleteUsersApi(selected);
-          if (r.success) {
-            setSelected([]);
-            fetchUsersRef.current(page);
-            fetchStatsRef.current();
-            addToast(r.message);
+          // Hard delete each selected user in parallel
+          const results = await Promise.allSettled(
+            selected.map((id) => hardDeleteUserApi(id)),
+          );
+          const succeeded = results.filter(
+            (r) => r.status === "fulfilled" && r.value?.success,
+          ).length;
+          const failed = results.length - succeeded;
+          setSelected([]);
+          fetchUsersRef.current(page);
+          fetchStatsRef.current();
+          if (failed === 0) {
+            addToast(`${succeeded} user(s) permanently deleted.`);
+          } else {
+            addToast(
+              `${succeeded} deleted, ${failed} failed.`,
+              failed > 0 && succeeded === 0 ? "error" : "success",
+            );
           }
         } catch (e) {
           addToast(
@@ -858,7 +863,6 @@ export default function ManageUsers() {
           background: "linear-gradient(135deg,#0F172A 0%,#0A0F1E 100%)",
         }}
       >
-        {/* Table header */}
         <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-4 px-6 py-3 border-b border-[#1E293B] text-xs font-bold uppercase tracking-widest text-slate-600">
           <input
             type="checkbox"

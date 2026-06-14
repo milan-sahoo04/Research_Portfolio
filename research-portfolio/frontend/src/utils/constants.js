@@ -20,14 +20,10 @@ export const NAV_LINKS = [
 
 export const PROJECT_CATEGORIES = [
   "All",
-  "AI",
-  "ML",
-  "Web",
-  "Research",
-  "Cloud",
-  "Data",
+  "journal",
+  "conference",
+  "case_study",
 ];
-
 export const BLOG_CATEGORIES = [
   "All",
   "AI",
@@ -40,11 +36,12 @@ export const BLOG_CATEGORIES = [
 export const ACHIEVEMENT_TYPES = [
   "Award",
   "Patent",
-  "Certification",
+  "Fellowship",
   "Grant",
-  "Publication",
+  "Certification",
+  "Recognition",
+  "Other",
 ];
-
 export const SOCIAL_LINKS = {
   github: "https://github.com",
   linkedin: "https://linkedin.com",

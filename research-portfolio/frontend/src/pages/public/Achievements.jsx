@@ -1,17 +1,20 @@
 // src/pages/public/Achievements.jsx
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Trophy, Award, Star } from "lucide-react";
+import { ExternalLink, FileText, Calendar, Building2 } from "lucide-react";
 import axios from "../../api/axios";
 import { ACHIEVEMENT_TYPES } from "../../utils/constants";
 
 const TYPE_ICONS = {
   Award: "🏆",
   Patent: "📜",
-  Certification: "🎖",
+  Fellowship: "🎓",
   Grant: "💰",
-  Publication: "📄",
+  Certification: "🎖",
+  Recognition: "⭐",
+  Other: "🏅",
 };
+
 const TYPE_COLORS = {
   Award: {
     bg: "rgba(245,158,11,0.1)",
@@ -23,20 +26,30 @@ const TYPE_COLORS = {
     border: "rgba(99,102,241,0.25)",
     text: "#818cf8",
   },
-  Certification: {
+  Fellowship: {
+    bg: "rgba(168,85,247,0.1)",
+    border: "rgba(168,85,247,0.25)",
+    text: "#c084fc",
+  },
+  Grant: {
     bg: "rgba(16,185,129,0.1)",
     border: "rgba(16,185,129,0.25)",
     text: "#34d399",
   },
-  Grant: {
-    bg: "rgba(59,130,246,0.1)",
-    border: "rgba(59,130,246,0.25)",
-    text: "#60a5fa",
+  Certification: {
+    bg: "rgba(56,189,248,0.1)",
+    border: "rgba(56,189,248,0.25)",
+    text: "#38bdf8",
   },
-  Publication: {
-    bg: "rgba(139,92,246,0.1)",
-    border: "rgba(139,92,246,0.25)",
-    text: "#a78bfa",
+  Recognition: {
+    bg: "rgba(244,63,94,0.1)",
+    border: "rgba(244,63,94,0.25)",
+    text: "#fb7185",
+  },
+  Other: {
+    bg: "rgba(100,116,139,0.1)",
+    border: "rgba(100,116,139,0.25)",
+    text: "#94a3b8",
   },
 };
 
@@ -90,6 +103,7 @@ export default function Achievements() {
           </p>
         </motion.div>
 
+        {/* Filter chips */}
         <div className="flex gap-2 flex-wrap justify-center mb-10">
           {["All", ...ACHIEVEMENT_TYPES].map((t) => (
             <button
@@ -115,7 +129,7 @@ export default function Achievements() {
             {[1, 2, 3, 4].map((i) => (
               <div
                 key={i}
-                className="h-36 rounded-2xl animate-pulse"
+                className="h-44 rounded-2xl animate-pulse"
                 style={{ background: "rgba(255,255,255,0.04)" }}
               />
             ))}
@@ -127,10 +141,10 @@ export default function Achievements() {
         ) : (
           <div className="grid md:grid-cols-2 gap-5">
             {filtered.map((item, i) => {
-              const color = TYPE_COLORS[item.type] || TYPE_COLORS.Award;
+              const color = TYPE_COLORS[item.type] || TYPE_COLORS.Other;
               return (
                 <motion.div
-                  key={item._id}
+                  key={item.id}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: i * 0.06 }}
@@ -141,41 +155,110 @@ export default function Achievements() {
                     border: "1px solid rgba(255,255,255,0.07)",
                   }}
                 >
-                  <div
-                    className="flex-shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-2xl"
-                    style={{
-                      background: color.bg,
-                      border: `1px solid ${color.border}`,
-                    }}
-                  >
-                    {TYPE_ICONS[item.type] || "🏅"}
-                  </div>
+                  {/* Image or icon */}
+                  {item.image ? (
+                    <img
+                      src={item.image}
+                      alt={item.title}
+                      className="flex-shrink-0 w-14 h-14 rounded-xl object-cover"
+                    />
+                  ) : (
+                    <div
+                      className="flex-shrink-0 w-14 h-14 rounded-xl flex items-center justify-center text-2xl"
+                      style={{
+                        background: color.bg,
+                        border: `1px solid ${color.border}`,
+                      }}
+                    >
+                      {TYPE_ICONS[item.type] || "🏅"}
+                    </div>
+                  )}
+
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2 mb-1">
                       <h3 className="font-bold" style={{ color: "#f1f5f9" }}>
                         {item.title}
                       </h3>
-                      <span
-                        className="text-xs px-2 py-0.5 rounded-full flex-shrink-0"
-                        style={{
-                          background: color.bg,
-                          color: color.text,
-                          border: `1px solid ${color.border}`,
-                        }}
-                      >
-                        {item.type}
-                      </span>
+                      {item.type && (
+                        <span
+                          className="text-xs px-2 py-0.5 rounded-full flex-shrink-0"
+                          style={{
+                            background: color.bg,
+                            color: color.text,
+                            border: `1px solid ${color.border}`,
+                          }}
+                        >
+                          {item.type}
+                        </span>
+                      )}
                     </div>
+
                     {item.description && (
-                      <p className="text-sm mb-2" style={{ color: "#64748b" }}>
-                        {item.description?.slice(0, 100)}
+                      <p
+                        className="text-sm mb-2 leading-relaxed"
+                        style={{ color: "#64748b" }}
+                      >
+                        {item.description?.slice(0, 140)}
+                        {item.description?.length > 140 ? "..." : ""}
                       </p>
                     )}
-                    {item.year && (
-                      <p className="text-xs" style={{ color: "#475569" }}>
-                        📅 {item.year}
-                      </p>
+
+                    {/* Tags */}
+                    {item.tags?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {item.tags.slice(0, 4).map((tag) => (
+                          <span
+                            key={tag}
+                            className="text-[10px] px-2 py-0.5 rounded-full"
+                            style={{
+                              background: "rgba(255,255,255,0.05)",
+                              color: "#94a3b8",
+                            }}
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
                     )}
+
+                    {/* Meta row */}
+                    <div
+                      className="flex items-center gap-4 flex-wrap text-xs"
+                      style={{ color: "#475569" }}
+                    >
+                      {item.issuer && (
+                        <span className="flex items-center gap-1.5">
+                          <Building2 size={11} /> {item.issuer}
+                        </span>
+                      )}
+                      {item.year && (
+                        <span className="flex items-center gap-1.5">
+                          <Calendar size={11} /> {item.year}
+                        </span>
+                      )}
+                      {item.url && (
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 hover:text-indigo-400 transition-colors"
+                          style={{ color: "#818cf8" }}
+                        >
+                          <ExternalLink size={11} /> View
+                        </a>
+                      )}
+                      {item.pdf_url && (
+                        <a
+                          href={item.pdf_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 hover:text-emerald-400 transition-colors"
+                          style={{ color: "#34d399" }}
+                        >
+                          <FileText size={11} /> PDF
+                        </a>
+                      )}
+                    </div>
                   </div>
                 </motion.div>
               );
