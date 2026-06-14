@@ -108,14 +108,13 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 
 // Auth limiter stays strict — brute-force protection
+// ✅ Fix
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: "Too many auth attempts. Please try again later.",
+  max: 50,
+  skip: (req) => {
+    // Skip rate limit for Google OAuth routes
+    return req.path.includes("/google");
   },
 });
 
